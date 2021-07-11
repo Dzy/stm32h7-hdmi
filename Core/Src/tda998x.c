@@ -326,47 +326,8 @@ extern LTDC_HandleTypeDef hltdc;
 # define CEC_ENAMODS_EN_HDMI      (1 << 1)
 # define CEC_ENAMODS_EN_CEC       (1 << 0)
 
-uint16_t current_page;
+void tda19988_testmode( void ) {
 
-int set_page(uint16_t reg) {
-
-    if (REG2PAGE(reg) != current_page) {
-        uint8_t buf[] = {REG_CURPAGE, REG2PAGE(reg)};
-        HAL_I2C_Master_Transmit(&hi2c1, 0x70<<1, &buf, sizeof(buf), 1000);
-        current_page = REG2PAGE(reg);
-    }
-    return 0;
-}
-
-
-int reg_read(uint16_t reg) {
-    uint8_t val = 0;
-
-    //uint8_t addr = REG2ADDR(reg);
-    //set_page(priv, reg);
-
-    //i2c_master_send(&addr, sizeof(addr));
-
-    //HAL_I2C_Master_Receive(&hi2c1, 0x70, &val, sizeof(val), 1000);
-
-    return val;
-}
-
-void reg_write(uint16_t reg, uint8_t val) {
-
-    set_page(reg);
-
-    uint8_t buf[] = {REG2ADDR(reg), val};
-    HAL_I2C_Master_Transmit(&hi2c1, 0x70<<1, &buf, sizeof(buf), 1000);
-    //if (ret < 0)
-    //    dev_err(&client->dev, "Error %d writing to 0x%x\n", ret, reg);
-
-
-}
-
-
-void tda19988_testmode( void )
-{
     uint8_t master_test[3];
 
     master_test[0] = 0xFF;
@@ -390,7 +351,6 @@ void tda19988_testmode( void )
     HAL_I2C_Master_Transmit(&hi2c1, I2C_ADDRESS_TDA19988_HDMI, &master_test, 2, 1000);
 
 }
-
 
 void w_reg(uint16_t reg, uint8_t val) {
 
@@ -419,7 +379,6 @@ void w16_reg(uint16_t reg, uint16_t val) {
     buf[1] = val;
     HAL_I2C_Master_Transmit(&hi2c1, I2C_ADDRESS_TDA, &buf, 2, 1000);
 }
-
 
 uint8_t r_reg(uint16_t reg) {
 
@@ -469,8 +428,6 @@ void c_reg(uint16_t reg, uint8_t val){
     w_reg(reg, old_val);
 }
 
-
-
 void read_edid(void) {
     w_reg(0x00F9, 0x00);
     w_reg(0x00FE, 0xa0);
@@ -480,8 +437,8 @@ void read_edid(void) {
 }
 
 uint8_t debug[200];
-
 extern LTDC_HandleTypeDef hltdc;
+
 void tda_init(void) {
 
     read_edid();
@@ -495,7 +452,6 @@ void tda_init(void) {
     if (div > 3)
         div = 3;
 
-
     /* first disable the video ports */
     w_reg(REG_ENA_VP_0, 0);
     w_reg(REG_ENA_VP_1, 0);
@@ -504,8 +460,8 @@ void tda_init(void) {
     /* shutdown audio */
     w_reg(REG_ENA_AP, 0);
 
-    line_clocks = LTDCSYNC[LTDC_VID_FORMAT].totalw+1; //LTDCSYNC[LTDC_VID_FORMAT].hsync + LTDCSYNC[LTDC_VID_FORMAT].hbp + LTDCSYNC[LTDC_VID_FORMAT].ahw + LTDCSYNC[LTDC_VID_FORMAT].hfp; //hsync_len.typ + hback_porch.typ + hactive.typ + hfront_porch.typ;
-    lines =       LTDCSYNC[LTDC_VID_FORMAT].totalh+1; //LTDCSYNC[LTDC_VID_FORMAT].vsync + LTDCSYNC[LTDC_VID_FORMAT].vbp + LTDCSYNC[LTDC_VID_FORMAT].avh + LTDCSYNC[LTDC_VID_FORMAT].vfp; //vsync_len.typ + vback_porch.typ + vactive.typ + vfront_porch.typ;
+    line_clocks = LTDCSYNC[LTDC_VID_FORMAT].totalw+1; 
+    lines =       LTDCSYNC[LTDC_VID_FORMAT].totalh+1;
 
     /* mute the audio FIFO */
     s_reg(REG_AIP_CNTRL_0, AIP_CNTRL_0_RST_FIFO);
