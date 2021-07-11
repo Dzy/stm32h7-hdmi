@@ -182,7 +182,7 @@ HAL_ADCEx_Calibration_Start(&hadc3, ADC_CALIB_OFFSET, ADC_SINGLE_ENDED);
   while (1)
   {
     readtemp();
-    HAL_Delay(1);
+    //HAL_Delay(1);
 
     if(lv_flush_screen == 0) {
       lv_task_handler();

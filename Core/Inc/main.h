@@ -44,7 +44,7 @@ extern "C" {
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
 
-#define LTDC_VID_FORMAT 9 //3 //E_LTDCVFMT_640x480p_72Hz //E_LTDCVFMT_800x600p_60Hz
+#define LTDC_VID_FORMAT 10
 
 /* USER CODE END EC */
 

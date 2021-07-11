@@ -165,8 +165,8 @@ void USBH_HID_EventCallback(USBH_HandleTypeDef *phost)
 
     if(MouseX<0) MouseX = 0;
     if(MouseY<0) MouseY = 0;
-    if(MouseX>1023) MouseX = 1023;
-    if(MouseY>767) MouseY = 767;
+    if(MouseX>1279) MouseX = 1279;
+    if(MouseY>1023) MouseY = 1023;
 
     MouseB[0] = Mouse_Info->buttons[0];
     MouseB[1] = Mouse_Info->buttons[1];
