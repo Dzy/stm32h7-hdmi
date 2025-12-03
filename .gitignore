@@ -1,0 +1,16 @@
+# Build output
+build/
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.asm
+
+# Editor and OS files
+*.swp
+*.swo
+*.bak
+.DS_Store
