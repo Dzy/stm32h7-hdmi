@@ -334,8 +334,14 @@ static USBH_StatusTypeDef USBH_HID_ClassRequest(USBH_HandleTypeDef *phost)
     break;
 
   case HID_REQ_SET_PROTOCOL:
-    /* set protocol */
-    classReqStatus = USBH_HID_SetProtocol(phost, 0U);
+    /*
+     * The ST helper uses a legacy inverted argument convention:
+     *   protocol != 0 -> USB HID SET_PROTOCOL wValue = 0 (BOOT)
+     *   protocol == 0 -> USB HID SET_PROTOCOL wValue = 1 (REPORT)
+     * usbh_hid_mouse.c decodes the fixed boot mouse layout (buttons, X, Y),
+     * therefore explicitly request BOOT protocol here.
+     */
+    classReqStatus = USBH_HID_SetProtocol(phost, 1U);
     if (classReqStatus == USBH_OK)
     {
       HID_Handle->ctl_state = HID_REQ_IDLE;
@@ -685,7 +691,7 @@ USBH_StatusTypeDef USBH_HID_SetProtocol(USBH_HandleTypeDef *phost,
     phost->Control.setup.b.wValue.w = 1U;
   }
 
-  phost->Control.setup.b.wIndex.w = 0U;
+  phost->Control.setup.b.wIndex.w = phost->device.current_interface;
   phost->Control.setup.b.wLength.w = 0U;
 
   return USBH_CtlReq(phost, 0U, 0U);

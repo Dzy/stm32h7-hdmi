@@ -22,7 +22,7 @@ TARGET = STM32H7_MyBoard
 # debug build?
 DEBUG = 1
 # optimization
-OPT = -Og
+OPT = -O3
 
 
 #######################################
@@ -30,6 +30,26 @@ OPT = -Og
 #######################################
 # Build path
 BUILD_DIR = build
+
+# LVGL is pinned to the v8.4.0 release because its native 8-bit color format is
+# RGB332, which maps byte-for-byte to this board's LTDC L8 framebuffer CLUT.
+LVGL_VERSION = v8.4.0
+LVGL_COMMIT = 4495f428630cc1741bd8bfd977f080e8460e8e8d
+LVGL_DIR = Middlewares/Third_Party/lvgl
+LVGL_STAMP = $(LVGL_DIR)/.stm32h7_lvgl_8_4_0
+
+# Missing included makefiles are remade before the build and then GNU make
+# restarts itself. This makes a plain `make` fetch the pinned LVGL source once,
+# after which the recursive source list below is available on the restarted pass.
+ifeq ($(filter clean distclean,$(MAKECMDGOALS)),)
+-include $(LVGL_STAMP)
+endif
+
+ifneq ($(wildcard $(LVGL_DIR)/lvgl.h),)
+LVGL_C_SOURCES := $(shell find $(LVGL_DIR)/src -type f -name '*.c' | sort)
+else
+LVGL_C_SOURCES :=
+endif
 
 ######################################
 # source
@@ -39,9 +59,13 @@ C_SOURCES =  \
 Core/Src/main.c \
 Core/Src/gpio.c \
 Core/Src/ltdc.c \
+Core/Src/rtc.c \
+Core/Src/dma.c \
 Core/Src/stm32h7xx_it.c \
 Core/Src/stm32h7xx_hal_msp.c \
 Core/Src/tda998x.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_rtc.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_rtc_ex.c \
 Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_cortex.c \
 Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_ltdc.c \
 Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_ltdc_ex.c \
@@ -87,14 +111,10 @@ Middlewares/ST/STM32_USB_Host_Library/Class/HID/Src/usbh_hid_mouse.c \
 Middlewares/ST/STM32_USB_Host_Library/Class/HID/Src/usbh_hid_parser.c \
 Core/Src/adc.c \
 Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_adc.c \
-Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_adc_ex.c
-
-LVGL_DIR := ./
-LVGL_DIR_NAME := lvgl
-
-include ./lvgl/lvgl.mk
-
-C_SOURCES += $(CSRCS)
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_adc_ex.c \
+Core/Src/lv_port.c \
+Core/Src/pixel_lab.c \
+$(LVGL_C_SOURCES)
 
 # ASM sources
 ASM_SOURCES =  \
@@ -128,8 +148,12 @@ BIN = $(CP) -O binary -S
 # cpu
 CPU = -mcpu=cortex-m7
 
-# fpu
+# fpu fpv5-sp-d16 (949,736 bytes) 55ms/73ms 40ms/53ms -Wdouble-promotion -fsingle-precision-constant
+#        fpv5-d16 (947,192 bytes) 55ms/73ms 40ms/53ms
+# LTDC_VID_FORMAT 10
 FPU = -mfpu=fpv5-d16
+
+FPU_FLAGS = -Wdouble-promotion -fsingle-precision-constant
 
 # float-abi
 FLOAT-ABI = -mfloat-abi=hard
@@ -147,7 +171,8 @@ AS_DEFS =
 # C defines
 C_DEFS =  \
 -DUSE_HAL_DRIVER \
--DSTM32H743xx
+-DSTM32H743xx \
+-DLV_CONF_INCLUDE_SIMPLE
 
 
 # AS includes
@@ -161,16 +186,17 @@ C_INCLUDES =  \
 -IDrivers/CMSIS/Device/ST/STM32H7xx/Include \
 -IDrivers/CMSIS/Include \
 -IDrivers/CMSIS/DSP/Include \
--Ilvgl \
 -IUSB_HOST/App \
 -IUSB_HOST/Target \
 -IMiddlewares/ST/STM32_USB_Host_Library/Core/Inc \
--IMiddlewares/ST/STM32_USB_Host_Library/Class/HID/Inc
+-IMiddlewares/ST/STM32_USB_Host_Library/Class/HID/Inc \
+-I$(LVGL_DIR) \
+-I$(LVGL_DIR)/src \
+-I$(LVGL_DIR)/demos
 
 # compile gcc flags
-ASFLAGS = $(MCU) $(AS_DEFS) $(AS_INCLUDES) $(OPT) -Wall -fdata-sections -ffunction-sections
-
-CFLAGS = $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) -Wall -fdata-sections -ffunction-sections
+ASFLAGS = $(MCU) $(AS_DEFS) $(AS_INCLUDES) $(OPT) -Wall -fdata-sections -ffunction-sections $(FPU_FLAGS)
+CFLAGS = $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) -std=gnu11 -Wall -fdata-sections -ffunction-sections $(FPU_FLAGS)
 
 ifeq ($(DEBUG), 1)
 CFLAGS += -g -gdwarf-2
@@ -199,17 +225,17 @@ all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_DIR)/$(TARGET
 #######################################
 # build the application
 #######################################
-# list of objects
-OBJECTS = $(addprefix $(BUILD_DIR)/,$(notdir $(C_SOURCES:.c=.o)))
-vpath %.c $(sort $(dir $(C_SOURCES)))
-# list of ASM program objects
-OBJECTS += $(addprefix $(BUILD_DIR)/,$(notdir $(ASM_SOURCES:.s=.o)))
-vpath %.s $(sort $(dir $(ASM_SOURCES)))
+# list of objects. Preserve each source path below build/ so LVGL files with
+# identical basenames in different subdirectories can never collide.
+OBJECTS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
+OBJECTS += $(patsubst %.s,$(BUILD_DIR)/%.o,$(ASM_SOURCES))
 
-$(BUILD_DIR)/%.o: %.c Makefile | $(BUILD_DIR) 
-	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(BUILD_DIR)/$(notdir $(<:.c=.lst)) $< -o $@
+$(BUILD_DIR)/%.o: %.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(patsubst %.o,%.lst,$@) $< -o $@
 
-$(BUILD_DIR)/%.o: %.s Makefile | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: %.s Makefile
+	@mkdir -p $(dir $@)
 	$(AS) -c $(CFLAGS) $< -o $@
 
 $(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) Makefile
@@ -223,7 +249,7 @@ $(BUILD_DIR)/%.bin: $(BUILD_DIR)/%.elf | $(BUILD_DIR)
 	$(BIN) $< $@	
 	
 $(BUILD_DIR):
-	mkdir $@		
+	mkdir -p $@
 
 #######################################
 # clean up
@@ -238,8 +264,31 @@ disasm:
 	$(OD) -j .rodata -j .text -d -Mforce-thumb $(BUILD_DIR)/$(TARGET).elf > $(TARGET).asm
 
 #######################################
+# LVGL dependency
+#######################################
+$(LVGL_STAMP):
+	@mkdir -p $(dir $(LVGL_DIR))
+	@if [ ! -f "$(LVGL_DIR)/lvgl.h" ]; then \
+		echo "Fetching LVGL $(LVGL_VERSION)..."; \
+		rm -rf "$(LVGL_DIR)"; \
+		git clone --quiet --depth 1 --branch "$(LVGL_VERSION)" https://github.com/lvgl/lvgl.git "$(LVGL_DIR)"; \
+	fi
+	@if [ -d "$(LVGL_DIR)/.git" ]; then \
+		test "$$(git -C "$(LVGL_DIR)" rev-parse HEAD)" = "$(LVGL_COMMIT)" || \
+		  (echo "Unexpected LVGL commit; expected $(LVGL_COMMIT)" >&2; exit 1); \
+	fi
+	@printf '# Auto-generated LVGL $(LVGL_VERSION) source stamp.\n' > "$@"
+
+.PHONY: lvgl-fetch vendor-lvgl distclean
+lvgl-fetch vendor-lvgl: $(LVGL_STAMP)
+
+# clean keeps the downloaded third-party dependency; distclean removes it too.
+distclean: clean
+	-rm -rf $(LVGL_DIR)
+
+#######################################
 # dependencies
 #######################################
--include $(wildcard $(BUILD_DIR)/*.d)
+-include $(OBJECTS:.o=.d)
 
 # *** EOF ***

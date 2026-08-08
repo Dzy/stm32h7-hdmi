@@ -29,7 +29,6 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "stm32h7xx_hal.h"
-#include "stm32h7xx_hal.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -43,8 +42,39 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
+/* LTDC timing/pixel-format entry selected from LTDCSYNC[]. */
+#define LTDC_VID_FORMAT 8U
 
-#define LTDC_VID_FORMAT 10
+/* External SDRAM and framebuffer layout.
+ *
+ * Two 4 MiB slots are reserved for L8 framebuffers.  The first 8 MiB is
+ * overlaid by a non-cacheable MPU region so CPU, DMA2D and LTDC always see
+ * the same bytes without per-frame cache maintenance.  The remaining SDRAM
+ * stays cacheable; the depth buffer starts immediately after the two slots.
+ */
+#define SDRAM_BASE_ADDRESS              0xC0000000U
+#define SDRAM_SIZE_BYTES                (32U * 1024U * 1024U)
+#define FRAMEBUFFER_SLOT_SIZE_BYTES     (4U * 1024U * 1024U)
+#define FRAMEBUFFER0_ADDRESS            (SDRAM_BASE_ADDRESS)
+#define FRAMEBUFFER1_ADDRESS            (SDRAM_BASE_ADDRESS + FRAMEBUFFER_SLOT_SIZE_BYTES)
+#define FRAMEBUFFER_MPU_SIZE_BYTES      (8U * 1024U * 1024U)
+/* Keep LVGL's working set off the external SDRAM bus.  The H743 has 512 KiB
+ * AXI SRAM at 0x24000000 and this linker script deliberately does not place
+ * normal .data/.bss there.  A 128 KiB reservation holds the 64-line RGB332
+ * draw buffer; the following 256 KiB is the LVGL TLSF heap. */
+#define AXI_SRAM_BASE_ADDRESS            0x24000000U
+#define AXI_SRAM_SIZE_BYTES              (512U * 1024U)
+#define LVGL_DRAW_BUFFER_ADDRESS         (AXI_SRAM_BASE_ADDRESS)
+#define LVGL_DRAW_BUFFER_RESERVE_BYTES   (128U * 1024U)
+#define LVGL_HEAP_ADDRESS                (AXI_SRAM_BASE_ADDRESS + LVGL_DRAW_BUFFER_RESERVE_BYTES)
+#define LVGL_HEAP_SIZE_BYTES             (256U * 1024U)
+
+/* Retained for compatibility with the original 3D project; LVGL does not use it. */
+#define DEPTH_BUFFER_ADDRESS             (SDRAM_BASE_ADDRESS + FRAMEBUFFER_MPU_SIZE_BYTES)
+
+/* If a fault happens after video has been initialized, paint the framebuffer
+ * with a diagnostic RGB332 index instead of silently leaving a black screen. */
+void Video_FatalPattern(uint8_t color_index);
 
 /* USER CODE END EC */
 

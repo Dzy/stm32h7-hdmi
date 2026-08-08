@@ -1,0 +1,8 @@
+build/
+Middlewares/Third_Party/lvgl/
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.d
