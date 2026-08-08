@@ -21,6 +21,26 @@
 #include "ltdc.h"
 
 /* USER CODE BEGIN 0 */
+const LTDCSYNC_t LTDCSYNC[] = {
+ /* PLL3                         Active       Horizontal timing       Vertical timing         Sync polarity                         HDMI AVI */
+ /* N    P  Q  R                W     H       FP   SW   BP             FP  SW  BP              H       V                           VIC Aspect */
+ { 252,  2, 2, 8,              640,  480,    24,  40, 128,             9,  3, 28,  LTDC_HSPOLARITY_AL, LTDC_VSPOLARITY_AL,   0, HDMI_AVI_ASPECT_NONE }, /*  0: VESA DMT 640x480 @ 72 Hz */
+ { 252,  2, 2, 8,              640,  480,    16,  64, 120,             1,  3, 16,  LTDC_HSPOLARITY_AL, LTDC_VSPOLARITY_AL,   0, HDMI_AVI_ASPECT_NONE }, /*  1: VESA DMT 640x480 @ 75 Hz */
+ { 400,  2, 2, 8,              800,  600,    56, 120,  64,            37,  6, 23,  LTDC_HSPOLARITY_AH, LTDC_VSPOLARITY_AH,   0, HDMI_AVI_ASPECT_NONE }, /*  2: VESA DMT 800x600 @ 72 Hz */
+ { 396,  2, 2, 8,              800,  600,    16,  80, 160,             1,  3, 21,  LTDC_HSPOLARITY_AH, LTDC_VSPOLARITY_AH,   0, HDMI_AVI_ASPECT_NONE }, /*  3: VESA DMT 800x600 @ 75 Hz */
+ { 450,  2, 2, 8,              800,  600,    32,  64, 152,             1,  3, 27,  LTDC_HSPOLARITY_AH, LTDC_VSPOLARITY_AH,   0, HDMI_AVI_ASPECT_NONE }, /*  4: VESA DMT 800x600 @ 85 Hz */
+ { 300,  4, 4, 4,             1024,  768,    24, 136, 144,             3,  6, 29,  LTDC_HSPOLARITY_AL, LTDC_VSPOLARITY_AL,   0, HDMI_AVI_ASPECT_NONE }, /*  5: VESA DMT 1024x768 @ 70 Hz */
+ { 315,  4, 4, 4,             1024,  768,    16,  96, 176,             1,  3, 28,  LTDC_HSPOLARITY_AH, LTDC_VSPOLARITY_AH,   0, HDMI_AVI_ASPECT_NONE }, /*  6: VESA DMT 1024x768 @ 75 Hz */
+ { 432,  4, 4, 4,             1280, 1024,    48, 112, 248,             1,  3, 38,  LTDC_HSPOLARITY_AH, LTDC_VSPOLARITY_AH,   0, HDMI_AVI_ASPECT_NONE }, /*  7: VESA DMT 1280x1024 @ 60 Hz */
+ { 297,  4, 4, 2,             1920, 1080,    88,  44, 148,             4,  5, 36,  LTDC_HSPOLARITY_AH, LTDC_VSPOLARITY_AH,  16, HDMI_AVI_ASPECT_16_9 }, /*  8: CTA-861 VIC 16, 1920x1080p60 -- DEFAULT */
+ { 297,  4, 4, 4,             1280,  720,   110,  40, 220,             5,  5, 20,  LTDC_HSPOLARITY_AH, LTDC_VSPOLARITY_AH,   4, HDMI_AVI_ASPECT_16_9 }, /*  9: CTA-861 VIC 4, 1280x720p60 */
+ { 297,  4, 4, 4,             1280,  720,   440,  40, 220,             5,  5, 20,  LTDC_HSPOLARITY_AH, LTDC_VSPOLARITY_AH,  19, HDMI_AVI_ASPECT_16_9 }, /* 10: CTA-861 VIC 19, 1280x720p50 */
+ { 297,  4, 4, 2,             1920, 1080,   528,  44, 148,             4,  5, 36,  LTDC_HSPOLARITY_AH, LTDC_VSPOLARITY_AH,  31, HDMI_AVI_ASPECT_16_9 }, /* 11: CTA-861 VIC 31, 1920x1080p50 */
+ { 297,  4, 4, 4,             1920, 1080,    88,  44, 148,             4,  5, 36,  LTDC_HSPOLARITY_AH, LTDC_VSPOLARITY_AH,  34, HDMI_AVI_ASPECT_16_9 }, /* 12: CTA-861 VIC 34, 1920x1080p30 -- RATE DIAGNOSTIC */
+};
+
+#define LTDC_MODE_COUNT (sizeof(LTDCSYNC) / sizeof(LTDCSYNC[0]))
+_Static_assert(LTDC_VID_FORMAT < LTDC_MODE_COUNT, "LTDC_VID_FORMAT is outside LTDCSYNC[]");    
 
 /* USER CODE END 0 */
 
@@ -31,116 +51,43 @@ void MX_LTDC_Init(void)
 {
   LTDC_LayerCfgTypeDef pLayerCfg;
 
-#if 0
-
   hltdc.Instance = LTDC;
-  hltdc.Init.HSPolarity = LTDC_HSPOLARITY_AL;
-  hltdc.Init.VSPolarity = LTDC_VSPOLARITY_AL;
-  hltdc.Init.DEPolarity = LTDC_DEPOLARITY_AL;
-  hltdc.Init.PCPolarity = LTDC_PCPOLARITY_IPC;
-  hltdc.Init.HorizontalSync = 63;
-  hltdc.Init.VerticalSync = 2;
-  hltdc.Init.AccumulatedHBP = 183;
-  hltdc.Init.AccumulatedVBP = 18;
-  hltdc.Init.AccumulatedActiveW = 823;
-  hltdc.Init.AccumulatedActiveH = 498;
-  hltdc.Init.TotalWidth = 839;
-  hltdc.Init.TotalHeigh = 499;
-  hltdc.Init.Backcolor.Blue = 0;
-  hltdc.Init.Backcolor.Green = 0;
-  hltdc.Init.Backcolor.Red = 0;
-  if (HAL_LTDC_Init(&hltdc) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  pLayerCfg.WindowX0 = 0;
-  pLayerCfg.WindowX1 = 640;
-  pLayerCfg.WindowY0 = 0;
-  pLayerCfg.WindowY1 = 480;
-  pLayerCfg.PixelFormat = LTDC_PIXEL_FORMAT_RGB565;
-  pLayerCfg.Alpha = 255;
-  pLayerCfg.Alpha0 = 0;
-  pLayerCfg.BlendingFactor1 = LTDC_BLENDING_FACTOR1_PAxCA;
-  pLayerCfg.BlendingFactor2 = LTDC_BLENDING_FACTOR2_PAxCA;
-  pLayerCfg.FBStartAdress = 0xc0000000;
-  pLayerCfg.ImageWidth = 640;
-  pLayerCfg.ImageHeight = 480;
-  pLayerCfg.Backcolor.Blue = 255;
-  pLayerCfg.Backcolor.Green = 255;
-  pLayerCfg.Backcolor.Red = 255;
-  if (HAL_LTDC_ConfigLayer(&hltdc, &pLayerCfg, 0) != HAL_OK)
-  {
-    Error_Handler();
-  }
-#else
-  /*
-                (MHz)   Horizontal (in Pixels)          Vertical (in Lines)
-
-Format          Pixel   Active  Front   Sync    Back    Active  Front   Sync    Back
-                Clock   Video   Porch   Pulse   Porch   Video   Porch   Pulse   Porch
-
-800x600, 60Hz   40.000  800     40      128     88      600     1       4       23
-*/
-
-#define AHW     800
-#define AVH     600
-
-#define HFP     40
-#define HSYNC   128
-#define HBP     88
-
-#define VFP     1
-#define VSYNC   4
-#define VBP     23
-
-#define HSW     HSYNC-1
-#define AHBP    HSYNC+HBP-1
-#define AAW     HSYNC+HBP+AHW-1
-#define TOTALW  HSYNC+HBP+AHW+HFP-1
-
-
-#define VSH     VSYNC-1
-#define AVBP    VSYNC+VBP-1
-#define AAH     VSYNC+VBP+AVH-1
-#define TOTALH  VSYNC+VBP+AVH+VFP-1
-
-/* USER CODE END 0 */
-
-  hltdc.Instance = LTDC;
-  hltdc.Init.HSPolarity = LTDC_HSPOLARITY_AH;
-  hltdc.Init.VSPolarity = LTDC_VSPOLARITY_AH;
+  hltdc.Init.HSPolarity = LTDCSYNC[LTDC_VID_FORMAT].hpol;
+  hltdc.Init.VSPolarity = LTDCSYNC[LTDC_VID_FORMAT].vpol;
   hltdc.Init.DEPolarity = LTDC_DEPOLARITY_AH;
   hltdc.Init.PCPolarity = LTDC_PCPOLARITY_IIPC;
-  hltdc.Init.HorizontalSync = LTDCSYNC[LTDC_VID_FORMAT].hsw;      //HSW;
-  hltdc.Init.VerticalSync = LTDCSYNC[LTDC_VID_FORMAT].vsh;        //VSH;
-  hltdc.Init.AccumulatedHBP = LTDCSYNC[LTDC_VID_FORMAT].ahbp;     //AHBP;
-  hltdc.Init.AccumulatedVBP = LTDCSYNC[LTDC_VID_FORMAT].avbp;     //AVBP;
-  hltdc.Init.AccumulatedActiveW = LTDCSYNC[LTDC_VID_FORMAT].aaw;  //AAW;
-  hltdc.Init.AccumulatedActiveH = LTDCSYNC[LTDC_VID_FORMAT].aah;  //AAH;
-  hltdc.Init.TotalWidth = LTDCSYNC[LTDC_VID_FORMAT].totalw;       //TOTALW;
-  hltdc.Init.TotalHeigh = LTDCSYNC[LTDC_VID_FORMAT].totalh;       //TOTALH;
+
+  hltdc.Init.HorizontalSync     = (LTDCSYNC[LTDC_VID_FORMAT].hsw - 1);
+  hltdc.Init.VerticalSync       = (LTDCSYNC[LTDC_VID_FORMAT].vsh - 1);
+  hltdc.Init.AccumulatedHBP     = (LTDCSYNC[LTDC_VID_FORMAT].hsw + LTDCSYNC[LTDC_VID_FORMAT].hbp - 1);
+  hltdc.Init.AccumulatedVBP     = (LTDCSYNC[LTDC_VID_FORMAT].vsh + LTDCSYNC[LTDC_VID_FORMAT].vbp - 1);
+  hltdc.Init.AccumulatedActiveW = (LTDCSYNC[LTDC_VID_FORMAT].hsw + LTDCSYNC[LTDC_VID_FORMAT].ahw + LTDCSYNC[LTDC_VID_FORMAT].hbp  - 1);
+  hltdc.Init.AccumulatedActiveH = (LTDCSYNC[LTDC_VID_FORMAT].vsh + LTDCSYNC[LTDC_VID_FORMAT].avh + LTDCSYNC[LTDC_VID_FORMAT].vbp  - 1);
+  hltdc.Init.TotalWidth         = (LTDCSYNC[LTDC_VID_FORMAT].hsw + LTDCSYNC[LTDC_VID_FORMAT].ahw + LTDCSYNC[LTDC_VID_FORMAT].hbp + LTDCSYNC[LTDC_VID_FORMAT].hfp - 1);
+  hltdc.Init.TotalHeigh         = (LTDCSYNC[LTDC_VID_FORMAT].vsh + LTDCSYNC[LTDC_VID_FORMAT].avh + LTDCSYNC[LTDC_VID_FORMAT].vbp + LTDCSYNC[LTDC_VID_FORMAT].vfp - 1);
+
   hltdc.Init.Backcolor.Blue = 0;
   hltdc.Init.Backcolor.Green = 0;
   hltdc.Init.Backcolor.Red = 0;
   HAL_LTDC_Init(&hltdc);
 
   pLayerCfg.WindowX0 = 0;
-  pLayerCfg.WindowX1 = LTDCSYNC[LTDC_VID_FORMAT].ahw; //800;
+  pLayerCfg.WindowX1 = LTDCSYNC[LTDC_VID_FORMAT].ahw;
   pLayerCfg.WindowY0 = 0;
-  pLayerCfg.WindowY1 = LTDCSYNC[LTDC_VID_FORMAT].avh; //600;
-  pLayerCfg.PixelFormat = LTDC_PIXEL_FORMAT_RGB565;
+  pLayerCfg.WindowY1 = LTDCSYNC[LTDC_VID_FORMAT].avh;
+  pLayerCfg.PixelFormat = LTDC_PIXEL_FORMAT_L8; //RGB565;
   pLayerCfg.Alpha = 255;
   pLayerCfg.Alpha0 = 0;
   pLayerCfg.BlendingFactor1 = LTDC_BLENDING_FACTOR1_PAxCA;
   pLayerCfg.BlendingFactor2 = LTDC_BLENDING_FACTOR2_PAxCA;
-  pLayerCfg.FBStartAdress = 0xc0000000;
+  pLayerCfg.FBStartAdress = FRAMEBUFFER0_ADDRESS;
   pLayerCfg.ImageWidth = LTDCSYNC[LTDC_VID_FORMAT].ahw;
   pLayerCfg.ImageHeight = LTDCSYNC[LTDC_VID_FORMAT].avh;
   pLayerCfg.Backcolor.Blue = 255;
   pLayerCfg.Backcolor.Green = 255;
   pLayerCfg.Backcolor.Red = 255;
   HAL_LTDC_ConfigLayer(&hltdc, &pLayerCfg, 0);
-#endif
+
 }
 
 void HAL_LTDC_MspInit(LTDC_HandleTypeDef* ltdcHandle)
@@ -196,38 +143,45 @@ void HAL_LTDC_MspInit(LTDC_HandleTypeDef* ltdcHandle)
     GPIO_InitStruct.Alternate = GPIO_AF9_LTDC;
     HAL_GPIO_Init(GPIOI, &GPIO_InitStruct);
 
+    GPIO_InitStruct.Pin = GPIO_PIN_4;
+    //GPIO_InitStruct.Alternate = GPIO_AF9_LTDC;
+    HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+    //GPIO_InitStruct.Alternate = GPIO_AF9_LTDC;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = GPIO_PIN_12;
+    //GPIO_InitStruct.Alternate = GPIO_AF9_LTDC;
+    HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+
     GPIO_InitStruct.Pin = GPIO_PIN_10;
     GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
     HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
     GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_6;
-    GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
+    //GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_4;
-    GPIO_InitStruct.Alternate = GPIO_AF9_LTDC;
-    HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
-
     GPIO_InitStruct.Pin = GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6;
-    GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
+    //GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
-    GPIO_InitStruct.Alternate = GPIO_AF9_LTDC;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
     GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_8|GPIO_PIN_9;
-    GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
+    //GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     GPIO_InitStruct.Pin = GPIO_PIN_6;
-    GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
+    //GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
     HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
     GPIO_InitStruct.Pin = GPIO_PIN_7;
-    GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
+    //GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
     HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
+    GPIO_InitStruct.Pin = GPIO_PIN_3;
+    //GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
     GPIO_InitStruct.Pin = GPIO_PIN_9;
     GPIO_InitStruct.Alternate = GPIO_AF10_LTDC;
@@ -236,14 +190,6 @@ void HAL_LTDC_MspInit(LTDC_HandleTypeDef* ltdcHandle)
     GPIO_InitStruct.Pin = GPIO_PIN_8;
     GPIO_InitStruct.Alternate = GPIO_AF13_LTDC;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = GPIO_PIN_3;
-    GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = GPIO_PIN_12;
-    GPIO_InitStruct.Alternate = GPIO_AF9_LTDC;
-    HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
     /* LTDC interrupt Init */
     HAL_NVIC_SetPriority(LTDC_IRQn, 0, 0);
