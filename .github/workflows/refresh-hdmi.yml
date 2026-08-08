@@ -1,0 +1,57 @@
+name: Validate HDMI refresh
+
+on:
+  push:
+    branches:
+      - chatgpt-hdmi-refresh
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: ${{ !contains(github.event.head_commit.message, '[build-ok]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct verified update
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat .sync/hdmi_part_* | base64 -d > /tmp/hdmi_repo_update.tar.gz
+          actual="$(sha256sum /tmp/hdmi_repo_update.tar.gz | awk '{print $1}')"
+          test "$actual" = "39c1f23b6245b7f217fc1505778fc121bd7d2598913fb76927a222cbdf11cd58"
+          tar -xzf /tmp/hdmi_repo_update.tar.gz -C .
+          rm -rf lvgl
+          rm -rf .sync
+
+      - name: Install ARM GCC
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi
+          arm-none-eabi-gcc --version
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          make -j2
+          arm-none-eabi-size build/STM32H7_MyBoard.elf
+
+      - name: Commit validated tree to work branch
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git status --short
+          git commit -m "[build-ok] Refresh HDMI reference to verified v3.12 platform"
+          git push origin HEAD:chatgpt-hdmi-refresh
