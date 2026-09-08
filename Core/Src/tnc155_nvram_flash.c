@@ -11,7 +11,7 @@
 #define TNC155_NVRAM_SLOT_B_ADDRESS 0x081E0000u
 #define TNC155_NVRAM_SLOT_A_SECTOR  FLASH_SECTOR_6
 #define TNC155_NVRAM_SLOT_B_SECTOR  FLASH_SECTOR_7
-#define TNC155_NVRAM_MAGIC          0x544E4331u /* "TNC1" */
+#define TNC155_NVRAM_MAGIC          0x544E4331u
 #define TNC155_NVRAM_VERSION        1u
 #define TNC155_FLASHWORD_SIZE       32u
 #define TNC155_NVRAM_SAVE_DELAY_MS  5000u
@@ -42,7 +42,6 @@ static uint32_t crc32_bytes(const uint8_t *data, size_t size)
 {
     uint32_t crc = 0xffffffffu;
     size_t i;
-
     for (i = 0u; i < size; ++i) {
         unsigned bit;
         crc ^= data[i];
@@ -67,17 +66,14 @@ static bool slot_valid(uint32_t address, size_t size,
                        uint32_t *sequence_out)
 {
     const tnc155_nvram_header *header = slot_header(address);
-
     if (size == 0u ||
         size > TNC155_NVRAM_SLOT_SIZE - sizeof(tnc155_nvram_header) ||
         header->magic != TNC155_NVRAM_MAGIC ||
         header->version != TNC155_NVRAM_VERSION ||
         header->length != size)
         return false;
-
     if (crc32_bytes(slot_payload(address), size) != header->crc32)
         return false;
-
     if (sequence_out != NULL)
         *sequence_out = header->sequence;
     return true;
@@ -125,14 +121,12 @@ static bool erase_slot(uint32_t sector)
 {
     FLASH_EraseInitTypeDef erase;
     uint32_t sector_error = 0xffffffffu;
-
     memset(&erase, 0, sizeof(erase));
     erase.TypeErase = FLASH_TYPEERASE_SECTORS;
     erase.Banks = FLASH_BANK_2;
     erase.Sector = sector;
     erase.NbSectors = 1u;
     erase.VoltageRange = FLASH_VOLTAGE_RANGE_4;
-
     if (HAL_FLASHEx_Erase(&erase, &sector_error) != HAL_OK) {
         s_last_error = HAL_FLASH_GetError();
         return false;
@@ -192,7 +186,6 @@ bool TNC155_NVRAM_Flash_Save(const uint8_t *src, size_t size,
         s_last_error = HAL_FLASH_GetError();
         return false;
     }
-
     __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_ALL_ERRORS_BANK2);
     if (!erase_slot(target_sector))
         goto out;
@@ -203,9 +196,8 @@ bool TNC155_NVRAM_Flash_Save(const uint8_t *src, size_t size,
             count = TNC155_FLASHWORD_SIZE;
         memset(flashword, 0xff, sizeof(flashword));
         memcpy(flashword, src + offset, count);
-        if (!program_flashword(target_address +
-                               sizeof(tnc155_nvram_header) + (uint32_t)offset,
-                               flashword))
+        if (!program_flashword(target_address + sizeof(tnc155_nvram_header) +
+                               (uint32_t)offset, flashword))
             goto out;
     }
 
@@ -216,7 +208,6 @@ bool TNC155_NVRAM_Flash_Save(const uint8_t *src, size_t size,
     header.length = (uint32_t)size;
     header.crc32 = crc32_bytes(src, size);
     memcpy(flashword, &header, sizeof(header));
-
     if (!program_flashword(target_address, flashword))
         goto out;
 
@@ -242,10 +233,10 @@ uint32_t TNC155_NVRAM_Flash_LastError(void)
 }
 
 bool TNC155_NVRAM_Init(tnc155_mainboard *board,
-                       const uint8_t *fallback, size_t fallback_size)
+                       const uint8_t *factory_image, size_t factory_size)
 {
-    if (board == NULL || fallback == NULL ||
-        fallback_size != sizeof(board->user_ram))
+    if (board == NULL || factory_image == NULL ||
+        factory_size != sizeof(board->user_ram))
         return false;
 
     s_last_error = 0u;
@@ -257,7 +248,7 @@ bool TNC155_NVRAM_Init(tnc155_mainboard *board,
     if (!TNC155_NVRAM_Flash_Load(board->user_ram, sizeof(board->user_ram),
                                  &s_sequence)) {
         uint32_t seed_sequence = 0u;
-        if (!TNC155_NVRAM_Flash_Save(fallback, fallback_size,
+        if (!TNC155_NVRAM_Flash_Save(factory_image, factory_size,
                                      &seed_sequence))
             return false;
         s_sequence = seed_sequence;
@@ -273,12 +264,13 @@ bool TNC155_NVRAM_Init(tnc155_mainboard *board,
     return true;
 }
 
-void TNC155_NVRAM_Task(tnc155_mainboard *board)
+uint32_t TNC155_NVRAM_Task(tnc155_mainboard *board)
 {
     uint32_t now;
+    uint32_t flash_start;
 
     if (board == NULL || !board->user_ram_loaded)
-        return;
+        return 0u;
 
     now = HAL_GetTick();
     if (board->user_ram_dirty) {
@@ -292,8 +284,9 @@ void TNC155_NVRAM_Task(tnc155_mainboard *board)
     }
 
     if (!s_save_pending || (int32_t)(now - s_save_due_ms) < 0)
-        return;
+        return 0u;
 
+    flash_start = HAL_GetTick();
     if (TNC155_NVRAM_Flash_Save(board->user_ram, sizeof(board->user_ram),
                                 &s_sequence)) {
         s_persisted_crc = crc32_bytes(board->user_ram,
@@ -304,6 +297,7 @@ void TNC155_NVRAM_Task(tnc155_mainboard *board)
         ++s_save_error_count;
         s_save_due_ms = HAL_GetTick() + TNC155_NVRAM_RETRY_MS;
     }
+    return HAL_GetTick() - flash_start;
 }
 
 bool TNC155_NVRAM_LoadedFromFlash(void)
