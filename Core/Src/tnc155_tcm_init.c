@@ -2,11 +2,14 @@
 
 #include "ltdc.h"
 #include "main.h"
+#include "tnc155/machine.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
+#define TNC155_MACHINE_ADDRESS (SDRAM_BASE_ADDRESS + (10U * 1024U * 1024U))
 
 /* Linker symbols emitted by tools/make_tnc155_linker.py. */
 extern uint8_t __tnc155_itcm_load__[];
@@ -20,6 +23,10 @@ extern uint8_t __tnc155_dtcm_bss_end__[];
 
 /* tnc155_firmware.c is compiled with Init renamed to this inner symbol. */
 bool TNC155_Firmware_Core_Init(void);
+
+static tnc155_machine *const s_tick_machine =
+    (tnc155_machine *)(uintptr_t)TNC155_MACHINE_ADDRESS;
+static volatile uint8_t s_tick_service_ready;
 
 static void copy_region(uint8_t *dst, const uint8_t *src, uint8_t *end)
 {
@@ -77,10 +84,7 @@ static void TNC155_ApplyAmberCLUT(void)
 
     /* The real monitor has two ON intensities, not a four-level phosphor.
        VIDEO=0 is black regardless of the brightness attribute.  VIDEO=1 is
-       either normal amber or the brighter amber level.  The direct L8
-       renderer still uses four electrical-combination indices, so collapse
-       the two OFF combinations to black and map the two ON combinations to
-       NORMAL and BRIGHT respectively.  Inverse only swaps VIDEO on/off. */
+       either normal amber or the brighter amber level. */
     clut[0x00u] = 0x000000u; /* brightness=0, VIDEO=0: black */
     clut[0x04u] = 0x000000u; /* brightness=1, VIDEO=0: black */
     clut[0xdfu] = 0xd88900u; /* brightness=0, VIDEO=1: normal amber */
@@ -94,11 +98,20 @@ static void TNC155_ApplyAmberCLUT(void)
     HAL_LTDC_DisableDither(&hltdc);
 }
 
+void TNC155_Firmware_SysTickISR(void)
+{
+    if (s_tick_service_ready != 0u)
+        tnc155_machine_service_1ms(s_tick_machine);
+}
+
 bool TNC155_Firmware_Init(void)
 {
+    s_tick_service_ready = 0u;
     TNC155_TCM_Init();
     if (!TNC155_Firmware_Core_Init())
         return false;
     TNC155_ApplyAmberCLUT();
+    __DMB();
+    s_tick_service_ready = 1u;
     return true;
 }
