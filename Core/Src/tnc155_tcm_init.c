@@ -60,9 +60,11 @@ static void TNC155_ApplyAmberCLUT(void)
     uint32_t clut[256];
     uint32_t i;
 
-    /* Preserve ordinary RGB332 for the debug overlay and any diagnostic
-       colours.  Only the four indices used by the emulated TNC phosphor are
-       replaced with amber monitor levels. */
+    /* Core_Init has already configured and enabled the L8 CLUT before it
+       schedules the first vertical-blanking framebuffer reload.  Therefore
+       update only the CLUT contents here: HAL_LTDC_EnableCLUT() performs an
+       immediate LTDC reload and can cancel that pending VBlank reload, leaving
+       the firmware's s_swap_pending flag stuck forever. */
     for (i = 0u; i < 256u; ++i) {
         uint32_t r3 = (i >> 5) & 7u;
         uint32_t g3 = (i >> 2) & 7u;
@@ -80,8 +82,9 @@ static void TNC155_ApplyAmberCLUT(void)
     clut[0xdfu] = 0xffb000u; /* bright amber */
     clut[0xffu] = 0xffffffu; /* debug text remains white */
 
-    if (HAL_LTDC_ConfigCLUT(&hltdc, clut, 256u, 0u) != HAL_OK ||
-        HAL_LTDC_EnableCLUT(&hltdc, 0u) != HAL_OK)
+    /* ConfigCLUT only writes CLUTWR entries and does not touch LTDC->SRCR.
+       The CLUT is already enabled by Core_Init, so no reload is required. */
+    if (HAL_LTDC_ConfigCLUT(&hltdc, clut, 256u, 0u) != HAL_OK)
         Error_Handler();
     HAL_LTDC_DisableDither(&hltdc);
 }
