@@ -1,0 +1,239 @@
+#######################################################################
+# STM32H743 TNC155 firmware
+#
+# HDMI/LTDC/TDA998x board support comes from this repository.
+# The emulator is taken from a sibling checkout of tnc155-emulator.
+# TinyUSB 0.21.0 is fetched and pinned automatically.
+#######################################################################
+
+TARGET = STM32H7_TNC155
+BUILD_DIR = build_tnc155
+DEBUG ?= 1
+OPT ?= -O3
+
+TNC155_DIR ?= ../tnc155-emulator
+TINYUSB_VERSION = 0.21.0
+TINYUSB_COMMIT = dae3f9a366bfcddbf9dcf1b48d7500286a849539
+TINYUSB_DIR = Middlewares/Third_Party/tinyusb
+TINYUSB_STAMP = $(TINYUSB_DIR)/.tnc155_tinyusb_0_21_0
+
+ifeq ($(filter clean distclean,$(MAKECMDGOALS)),)
+-include $(TINYUSB_STAMP)
+endif
+
+TNC155_GENERATED_DIR = $(BUILD_DIR)/generated
+TNC155_ROM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_rom_images.h
+TNC155_NVRAM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_default_user_ram.h
+TNC155_ROM_DIR = $(TNC155_DIR)/roms
+TNC155_ROM5_FILE = $(TNC155_DIR)/rom-overrides/new_2340005E_nr5.bin
+TNC155_NVRAM_FILE = $(TNC155_DIR)/tnc155-user-ram.bin
+TNC155_ROM_FILES = \
+$(TNC155_ROM_DIR)/2340201A_nr1.rom \
+$(TNC155_ROM_DIR)/2340202C_nr2.rom \
+$(TNC155_ROM_DIR)/2340083E_nr3_finnish.rom \
+$(TNC155_ROM_DIR)/2340204D_nr4.rom \
+$(TNC155_ROM5_FILE) \
+$(TNC155_ROM_DIR)/2346166A_nr6.rom
+
+# Board/application sources. Deliberately no Cube USB Host, HID or LVGL.
+C_SOURCES = \
+Core/Src/tnc155_main.c \
+Core/Src/tnc155_firmware.c \
+Core/Src/tnc155_usb_cdc.c \
+Core/Src/gpio.c \
+Core/Src/ltdc.c \
+Core/Src/rtc.c \
+Core/Src/dma.c \
+Core/Src/stm32h7xx_it.c \
+Core/Src/stm32h7xx_hal_msp.c \
+Core/Src/tda998x.c \
+Core/Src/system_stm32h7xx.c \
+Core/Src/fmc.c \
+Core/Src/dma2d.c \
+Core/Src/i2c.c \
+Core/Src/i2s.c \
+Core/Src/adc.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_rtc.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_rtc_ex.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_cortex.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_ltdc.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_ltdc_ex.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_rcc.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_rcc_ex.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_flash.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_flash_ex.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_gpio.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_hsem.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_dma.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_dma_ex.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_mdma.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_pwr.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_pwr_ex.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_i2c.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_i2c_ex.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_exti.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_tim.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_tim_ex.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_ll_fmc.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sdram.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_dma2d.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_i2s.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_i2s_ex.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_adc.c \
+Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_adc_ex.c \
+$(TINYUSB_DIR)/src/tusb.c \
+$(TINYUSB_DIR)/src/common/tusb_fifo.c \
+$(TINYUSB_DIR)/src/host/usbh.c \
+$(TINYUSB_DIR)/src/host/hub.c \
+$(TINYUSB_DIR)/src/class/cdc/cdc_host.c \
+$(TINYUSB_DIR)/src/portable/synopsys/dwc2/hcd_dwc2.c \
+$(TINYUSB_DIR)/src/portable/synopsys/dwc2/dwc2_common.c
+
+ASM_SOURCES = startup_stm32h743xx.s
+
+# TNC core sources are compiled with a separate rule so an external checkout
+# never produces object paths outside BUILD_DIR.
+TNC155_REL_C_SOURCES = \
+src/roms.c \
+src/cpu/tms9995.c \
+src/plc/plc.c \
+src/plc/plc_io.c \
+src/io/io_backplane.c \
+src/main/i8279.c \
+src/serial/tms9902.c \
+src/main/main_mapper.c \
+src/main/mainboard.c \
+src/clp/clp_board.c \
+src/clp/upd7220.c \
+src/machine/machine.c \
+src/clp/video.c \
+src/frontend/serial_keyboard_protocol.c
+
+PREFIX = arm-none-eabi-
+ifdef GCC_PATH
+CC = $(GCC_PATH)/$(PREFIX)gcc
+AS = $(GCC_PATH)/$(PREFIX)gcc -x assembler-with-cpp
+CP = $(GCC_PATH)/$(PREFIX)objcopy
+SZ = $(GCC_PATH)/$(PREFIX)size
+else
+CC = $(PREFIX)gcc
+AS = $(PREFIX)gcc -x assembler-with-cpp
+CP = $(PREFIX)objcopy
+SZ = $(PREFIX)size
+OD = $(PREFIX)objdump
+endif
+HEX = $(CP) -O ihex
+BIN = $(CP) -O binary -S
+
+CPU = -mcpu=cortex-m7
+FPU = -mfpu=fpv5-d16
+FLOAT_ABI = -mfloat-abi=hard
+MCU = $(CPU) -mthumb $(FPU) $(FLOAT_ABI) -DARM_MATH_CM7 -D__FPU_PRESENT
+FPU_FLAGS = -Wdouble-promotion -fsingle-precision-constant
+
+C_DEFS = \
+-DUSE_HAL_DRIVER \
+-DSTM32H743xx \
+-DCFG_TUSB_MCU=OPT_MCU_STM32H7 \
+-DTNC155_FIRMWARE=1 \
+-DTNC155_SERIAL_KEYBOARD_TRACE=0
+
+C_INCLUDES = \
+-ICore/Inc \
+-IDrivers/STM32H7xx_HAL_Driver/Inc \
+-IDrivers/STM32H7xx_HAL_Driver/Inc/Legacy \
+-IDrivers/CMSIS/Device/ST/STM32H7xx/Include \
+-IDrivers/CMSIS/Include \
+-I$(TINYUSB_DIR)/src \
+-I$(TNC155_DIR)/include \
+-I$(TNC155_GENERATED_DIR)
+
+ASFLAGS = $(MCU) $(OPT) -Wall -fdata-sections -ffunction-sections $(FPU_FLAGS)
+CFLAGS = $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) -std=gnu11 -Wall \
+-fdata-sections -ffunction-sections $(FPU_FLAGS)
+ifeq ($(DEBUG),1)
+CFLAGS += -g -gdwarf-2
+endif
+CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
+
+LDSCRIPT = STM32H743IITx_FLASH.ld
+INCLUDES_LIBS_H7 = Drivers/CMSIS/Lib/GCC/libarm_cortexM7lfdp_math.a
+LIBS = -lc -lm -lnosys
+LDFLAGS = $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBS) \
+-Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections $(INCLUDES_LIBS_H7)
+
+OBJECTS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
+OBJECTS += $(patsubst %.s,$(BUILD_DIR)/%.o,$(ASM_SOURCES))
+TNC155_OBJECTS = $(patsubst %.c,$(BUILD_DIR)/tnc155/%.o,$(TNC155_REL_C_SOURCES))
+ALL_OBJECTS = $(OBJECTS) $(TNC155_OBJECTS)
+
+all: check-tnc155 $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_DIR)/$(TARGET).bin
+
+.PHONY: check-tnc155
+check-tnc155:
+	@test -f "$(TNC155_DIR)/src/frontend/serial_keyboard_protocol.c" || \
+	  (echo "TNC155_DIR must point to tnc155-emulator branch stm32-portable-serial" >&2; exit 1)
+
+$(TNC155_ROM_HEADER): $(TNC155_DIR)/tools/embed_roms.py $(TNC155_ROM_FILES)
+	@mkdir -p $(dir $@)
+	python3 "$(TNC155_DIR)/tools/embed_roms.py" "$(TNC155_ROM_DIR)" "$@" --p5 "$(TNC155_ROM5_FILE)"
+
+$(TNC155_NVRAM_HEADER): $(TNC155_DIR)/tools/embed_nvram.py $(TNC155_NVRAM_FILE)
+	@mkdir -p $(dir $@)
+	python3 "$(TNC155_DIR)/tools/embed_nvram.py" "$(TNC155_NVRAM_FILE)" "$@"
+
+$(BUILD_DIR)/Core/Src/tnc155_firmware.o: $(TNC155_NVRAM_HEADER)
+
+$(BUILD_DIR)/%.o: %.c Makefile.tnc155
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(patsubst %.o,%.lst,$@) $< -o $@
+
+$(BUILD_DIR)/%.o: %.s Makefile.tnc155
+	@mkdir -p $(dir $@)
+	$(AS) -c $(ASFLAGS) $< -o $@
+
+$(BUILD_DIR)/tnc155/%.o: $(TNC155_DIR)/%.c Makefile.tnc155 $(TNC155_ROM_HEADER)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(patsubst %.o,%.lst,$@) $< -o $@
+
+$(BUILD_DIR)/$(TARGET).elf: $(ALL_OBJECTS) Makefile.tnc155
+	$(CC) $(ALL_OBJECTS) $(LDFLAGS) -o $@
+	$(SZ) $@
+
+$(BUILD_DIR)/%.hex: $(BUILD_DIR)/%.elf | $(BUILD_DIR)
+	$(HEX) $< $@
+
+$(BUILD_DIR)/%.bin: $(BUILD_DIR)/%.elf | $(BUILD_DIR)
+	$(BIN) $< $@
+
+$(BUILD_DIR):
+	mkdir -p $@
+
+$(TINYUSB_STAMP):
+	@mkdir -p $(dir $(TINYUSB_DIR))
+	@echo "Fetching TinyUSB $(TINYUSB_VERSION) ($(TINYUSB_COMMIT))..."
+	@rm -rf "$(TINYUSB_DIR)"
+	@git clone --quiet --filter=blob:none https://github.com/hathach/tinyusb.git "$(TINYUSB_DIR)"
+	@git -C "$(TINYUSB_DIR)" checkout --quiet --detach "$(TINYUSB_COMMIT)"
+	@test "$$(git -C "$(TINYUSB_DIR)" rev-parse HEAD)" = "$(TINYUSB_COMMIT)"
+	@printf '# Auto-generated TinyUSB $(TINYUSB_VERSION) source stamp.\n' > "$@"
+
+.PHONY: tinyusb-fetch flash clean distclean disasm
+tinyusb-fetch: $(TINYUSB_STAMP)
+
+flash: $(BUILD_DIR)/$(TARGET).bin
+	STM32_Programmer_CLI -c port=SWD -w $< 0x08000000 -rst
+
+disasm: $(BUILD_DIR)/$(TARGET).elf
+	$(OD) -d -Mforce-thumb $< > $(TARGET).asm
+
+clean:
+	-rm -rf $(BUILD_DIR)
+
+distclean: clean
+	-rm -rf $(TINYUSB_DIR)
+
+-include $(ALL_OBJECTS:.o=.d)
+
+# EOF
