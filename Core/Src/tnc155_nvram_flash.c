@@ -17,9 +17,6 @@
 #define TNC155_NVRAM_SAVE_QUIET_MS  5000u
 #define TNC155_NVRAM_RETRY_MS       10000u
 
-/* STM32H743 programs Bank 2 in 256-bit flash words.  The header is written
-   last, after the complete payload, so a reset or power loss can never turn a
-   partially programmed target slot into the newest valid copy. */
 typedef struct tnc155_nvram_header {
     uint32_t magic;
     uint32_t version;
@@ -199,8 +196,6 @@ bool TNC155_NVRAM_Flash_Save(const uint8_t *src, size_t size,
     if (!erase_slot(target_sector))
         goto out;
 
-    /* Program payload first.  Every payload chunk is a complete 32-byte H7
-       flash word; the TNC User RAM size (0x12000) is naturally aligned. */
     for (offset = 0u; offset < size; offset += TNC155_FLASHWORD_SIZE) {
         size_t count = size - offset;
         if (count > TNC155_FLASHWORD_SIZE)
@@ -221,7 +216,6 @@ bool TNC155_NVRAM_Flash_Save(const uint8_t *src, size_t size,
     header.crc32 = crc32_bytes(src, size);
     memcpy(flashword, &header, sizeof(header));
 
-    /* Commit record last.  CRC validation makes this atomic at slot level. */
     if (!program_flashword(target_address, flashword))
         goto out;
 
@@ -249,8 +243,6 @@ uint32_t TNC155_NVRAM_Flash_LastError(void)
 bool TNC155_NVRAM_Init(tnc155_mainboard *board,
                        const uint8_t *fallback, size_t fallback_size)
 {
-    uint32_t now;
-
     if (board == NULL || fallback == NULL ||
         fallback_size != sizeof(board->user_ram))
         return false;
@@ -259,20 +251,28 @@ bool TNC155_NVRAM_Init(tnc155_mainboard *board,
     s_sequence = 0u;
     s_save_count = 0u;
     s_save_error_count = 0u;
-    s_loaded_from_flash = TNC155_NVRAM_Flash_Load(
-        board->user_ram, sizeof(board->user_ram), &s_sequence);
+    s_save_pending = false;
 
-    if (!s_loaded_from_flash)
-        memcpy(board->user_ram, fallback, sizeof(board->user_ram));
+    /* Normal boot path: User RAM is always sourced from internal flash. */
+    if (!TNC155_NVRAM_Flash_Load(board->user_ram, sizeof(board->user_ram),
+                                 &s_sequence)) {
+        /* First installation (or both slots invalid): provision a valid flash
+           slot from the compiled factory image, then read it back exactly as
+           every later boot does.  The emulator never runs directly from the
+           compiled fallback image. */
+        uint32_t seed_sequence = 0u;
+        if (!TNC155_NVRAM_Flash_Save(fallback, fallback_size,
+                                     &seed_sequence))
+            return false;
+        s_sequence = seed_sequence;
+        if (!TNC155_NVRAM_Flash_Load(board->user_ram,
+                                     sizeof(board->user_ram), &s_sequence))
+            return false;
+    }
 
+    s_loaded_from_flash = true;
     board->user_ram_loaded = true;
     board->user_ram_dirty = false;
-
-    /* Seed a persistent slot after first installation.  Any TNC writes during
-       boot simply postpone this until the RAM has been quiet for 5 seconds. */
-    now = HAL_GetTick();
-    s_save_pending = !s_loaded_from_flash;
-    s_save_due_ms = now + TNC155_NVRAM_SAVE_QUIET_MS;
     return true;
 }
 
@@ -285,8 +285,6 @@ void TNC155_NVRAM_Task(tnc155_mainboard *board)
 
     now = HAL_GetTick();
     if (board->user_ram_dirty) {
-        /* Consume the edge.  Any later write sets it again and restarts the
-           quiet timer, coalescing byte writes into one sector transaction. */
         board->user_ram_dirty = false;
         s_save_pending = true;
         s_save_due_ms = now + TNC155_NVRAM_SAVE_QUIET_MS;
