@@ -32,14 +32,13 @@
 #define DEBUG_FG      0xffU
 #define DEBUG_BG      0x00U
 
-/* These are the RGB332 indices obtained from the original ARGB phosphor
-   colours.  Keeping the existing 256-entry RGB332 CLUT also leaves index
-   0xff available as white for the diagnostic overlay. */
+/* L8 values are CLUT indices, not four phosphor colours.  D1 selects the
+   brightness of an ON pixel; both OFF states are black. */
 enum {
-    TNC_L8_BLACK  = 0x00,
-    TNC_L8_BRIGHT = 0xdf,
-    TNC_L8_DARK   = 0x04,
-    TNC_L8_DIM    = 0x71
+    TNC_L8_OFF_NORMAL = 0x00,
+    TNC_L8_ON_NORMAL  = 0xdf,
+    TNC_L8_OFF_BRIGHT = 0x04,
+    TNC_L8_ON_BRIGHT  = 0x71
 };
 
 _Static_assert((TNC155_MACHINE_ADDRESS + sizeof(tnc155_machine)) <=
@@ -398,7 +397,8 @@ static bool locate_scanline(const tnc155_upd7220 *gdc, unsigned y,
 static void render_tnc_l8(uint8_t *dst)
 {
     static const uint8_t phosphor[4] = {
-        TNC_L8_BLACK, TNC_L8_BRIGHT, TNC_L8_DARK, TNC_L8_DIM
+        TNC_L8_OFF_NORMAL, TNC_L8_ON_NORMAL,
+        TNC_L8_OFF_BRIGHT, TNC_L8_ON_BRIGHT
     };
     const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
     unsigned active_height = tnc155_video_active_height(s_machine);
@@ -414,7 +414,7 @@ static void render_tnc_l8(uint8_t *dst)
        then cannot leave stale scanlines in the framebuffer. */
     for (y = 0u; y < TNC155_VIDEO_HEIGHT; ++y)
         memset(dst + (size_t)(TNC_Y0_MAX + y) * HDMI_WIDTH + TNC_X0,
-               TNC_L8_BLACK, TNC155_VIDEO_WIDTH);
+               TNC_L8_OFF_NORMAL, TNC155_VIDEO_WIDTH);
 
     if (!gdc->display_enabled)
         return;
@@ -479,7 +479,7 @@ static void render_tnc_l8(uint8_t *dst)
                 uint8_t *word_dst = row + word_column * 16u;
                 for (bit = 0u; bit < 16u; ++bit)
                     word_dst[bit] = (bits & (uint16_t)(1u << bit)) != 0u ?
-                                    TNC_L8_BRIGHT : TNC_L8_BLACK;
+                                    TNC_L8_ON_NORMAL : TNC_L8_OFF_NORMAL;
             }
         }
     }
