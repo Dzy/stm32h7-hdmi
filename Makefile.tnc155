@@ -24,12 +24,12 @@ endif
 
 TNC155_GENERATED_DIR = $(BUILD_DIR)/generated
 TNC155_ROM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_rom_images.h
-TNC155_NVRAM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_default_user_ram.h
-TNC155_NVRAM_FACTORY_C = $(TNC155_GENERATED_DIR)/tnc155_nvram_factory.c
-TNC155_NVRAM_FACTORY_OBJ = $(TNC155_GENERATED_DIR)/tnc155_nvram_factory.o
+TNC155_USER_RAM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_default_user_ram.h
 TNC155_ROM_DIR = $(TNC155_DIR)/roms
 TNC155_ROM5_FILE = $(TNC155_DIR)/rom-overrides/new_2340005E_nr5.bin
-TNC155_NVRAM_FILE = $(TNC155_DIR)/tnc155-user-ram.bin
+TNC155_USER_RAM_FILE ?= $(TNC155_DIR)/tnc155-user-ram.bin
+# Exact image supplied for the STM32 port, 73728 bytes / 0x12000.
+TNC155_USER_RAM_SHA256 = 1805c3b50110915c5b46d53751e98a23fcfca427281415965863bd438191179d
 TNC155_ROM_FILES = \
 $(TNC155_ROM_DIR)/2340201A_nr1.rom \
 $(TNC155_ROM_DIR)/2340202C_nr2.rom \
@@ -42,8 +42,7 @@ $(TNC155_ROM_DIR)/2346166A_nr6.rom
 C_SOURCES = \
 Core/Src/tnc155_main.c \
 Core/Src/tnc155_firmware.c \
-Core/Src/tnc155_firmware_persist.c \
-Core/Src/tnc155_nvram_flash.c \
+Core/Src/tnc155_tcm_init.c \
 Core/Src/tnc155_usb_cdc.c \
 Core/Src/gpio.c \
 Core/Src/ltdc.c \
@@ -119,6 +118,7 @@ CC = $(GCC_PATH)/$(PREFIX)gcc
 AS = $(GCC_PATH)/$(PREFIX)gcc -x assembler-with-cpp
 CP = $(GCC_PATH)/$(PREFIX)objcopy
 SZ = $(GCC_PATH)/$(PREFIX)size
+OD = $(GCC_PATH)/$(PREFIX)objdump
 else
 CC = $(PREFIX)gcc
 AS = $(PREFIX)gcc -x assembler-with-cpp
@@ -160,25 +160,23 @@ CFLAGS += -g -gdwarf-2
 endif
 CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 
-# Application code is limited to the first 1792 KiB.  Bank 2 sectors 6 and 7
-# (0x081C0000 and 0x081E0000) are dedicated to persistent TNC User RAM.
+# TMS9995 is deliberately a non-LTO object.  The linker can then identify its
+# input sections and place executable code in ITCM and compiler-generated
+# constants/jump tables in DTCM.  The rest of the firmware remains LTO-built.
+TMS9995_OBJECT = $(BUILD_DIR)/tnc155/src/cpu/tms9995.o
+TMS9995_CFLAGS = $(filter-out -flto -fuse-linker-plugin,$(CFLAGS)) -fno-lto
+
 LDSCRIPT_BASE = STM32H743IITx_FLASH.ld
 LDSCRIPT = $(BUILD_DIR)/STM32H743IITx_TNC155_FLASH.ld
 INCLUDES_LIBS_H7 = Drivers/CMSIS/Lib/GCC/libarm_cortexM7lfdp_math.a
 LIBS = -lc -lm -lnosys
-NVRAM_LINK_FLAGS = \
--Wl,--section-start=.tnc155_nvram_factory_a=0x081C0000 \
--Wl,--section-start=.tnc155_nvram_factory_b=0x081E0000 \
--Wl,--undefined=g_tnc155_nvram_factory_slot_a \
--Wl,--undefined=g_tnc155_nvram_factory_slot_b_marker
 LDFLAGS = $(MCU) $(LTO_FLAGS) -specs=nano.specs -T$(LDSCRIPT) $(LIBS) \
-$(NVRAM_LINK_FLAGS) \
 -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections $(INCLUDES_LIBS_H7)
 
 OBJECTS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 OBJECTS += $(patsubst %.s,$(BUILD_DIR)/%.o,$(ASM_SOURCES))
 TNC155_OBJECTS = $(patsubst %.c,$(BUILD_DIR)/tnc155/%.o,$(TNC155_REL_C_SOURCES))
-ALL_OBJECTS = $(OBJECTS) $(TNC155_OBJECTS) $(TNC155_NVRAM_FACTORY_OBJ)
+ALL_OBJECTS = $(OBJECTS) $(TNC155_OBJECTS)
 
 all: check-tnc155 $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_DIR)/$(TARGET).bin
 
@@ -186,42 +184,34 @@ all: check-tnc155 $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_
 check-tnc155:
 	@test -f "$(TNC155_DIR)/src/frontend/serial_keyboard_protocol.c" || \
 	  (echo "TNC155_DIR must point to tnc155-emulator branch stm32-portable-serial" >&2; exit 1)
+	@test -f "$(TNC155_USER_RAM_FILE)" || \
+	  (echo "Missing TNC155 User RAM image: $(TNC155_USER_RAM_FILE)" >&2; exit 1)
+	@test "$$(stat -c %s "$(TNC155_USER_RAM_FILE)")" = "73728" || \
+	  (echo "TNC155 User RAM must be exactly 73728 bytes" >&2; exit 1)
+	@test "$$(sha256sum "$(TNC155_USER_RAM_FILE)" | awk '{print $$1}')" = "$(TNC155_USER_RAM_SHA256)" || \
+	  (echo "Wrong TNC155 User RAM image; expected SHA256 $(TNC155_USER_RAM_SHA256)" >&2; exit 1)
 
 $(TNC155_ROM_HEADER): $(TNC155_DIR)/tools/embed_roms.py $(TNC155_ROM_FILES)
 	@mkdir -p $(dir $@)
 	python3 "$(TNC155_DIR)/tools/embed_roms.py" "$(TNC155_ROM_DIR)" "$@" --p5 "$(TNC155_ROM5_FILE)"
 
-# Retained for the current core-init implementation; persistence immediately
-# replaces this temporary RAM copy from the flash slot before emulation starts.
-$(TNC155_NVRAM_HEADER): $(TNC155_DIR)/tools/embed_nvram.py $(TNC155_NVRAM_FILE)
+# Compile the supplied 72 KiB User RAM into normal firmware rodata.  At boot
+# tnc155_firmware.c memcpy()s it to s_machine->main.user_ram[] in SDRAM.  There
+# is intentionally no STM32 internal-flash persistence path.
+$(TNC155_USER_RAM_HEADER): $(TNC155_DIR)/tools/embed_nvram.py $(TNC155_USER_RAM_FILE)
 	@mkdir -p $(dir $@)
-	python3 "$(TNC155_DIR)/tools/embed_nvram.py" "$(TNC155_NVRAM_FILE)" "$@"
+	python3 "$(TNC155_DIR)/tools/embed_nvram.py" "$(TNC155_USER_RAM_FILE)" "$@"
 
-# This is the actual nonvolatile boot image.  Slot A contains header+CRC+72 KiB
-# User RAM; slot B contains an invalid marker so reflashing firmware invalidates
-# an older runtime B slot and selects the newly compiled User RAM.
-$(TNC155_NVRAM_FACTORY_C): tools/embed_tnc155_nvram_slot.py $(TNC155_NVRAM_FILE)
-	@mkdir -p $(dir $@)
-	python3 tools/embed_tnc155_nvram_slot.py "$(TNC155_NVRAM_FILE)" "$@"
-
-$(TNC155_NVRAM_FACTORY_OBJ): $(TNC155_NVRAM_FACTORY_C) Makefile.tnc155
-	$(CC) -c $(CFLAGS) $< -o $@
-
-# Compile the existing firmware implementation as an inner core.  Its clock is
-# persistence-aware, so sector erase/program time never inflates emulation lag.
-$(BUILD_DIR)/Core/Src/tnc155_firmware.o: Core/Src/tnc155_firmware.c Makefile.tnc155 $(TNC155_NVRAM_HEADER)
+# Rename only Init so a small wrapper can populate ITCM/DTCM before the first
+# TMS9995 call.  Task and LTDC callbacks are provided directly by the core.
+$(BUILD_DIR)/Core/Src/tnc155_firmware.o: Core/Src/tnc155_firmware.c Makefile.tnc155 $(TNC155_USER_RAM_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) \
 	  -DTNC155_Firmware_Init=TNC155_Firmware_Core_Init \
-	  -DTNC155_Firmware_Task=TNC155_Firmware_Core_Task \
-	  -DHAL_GetTick=TNC155_PacedTick \
-	  -include Core/Inc/tnc155_paced_tick.h \
 	  -Wa,-a,-ad,-alms=$(patsubst %.o,%.lst,$@) $< -o $@
 
-$(LDSCRIPT): $(LDSCRIPT_BASE) | $(BUILD_DIR)
-	sed 's/LENGTH = 2048K/LENGTH = 1792K/' $< > $@
-	@grep -q 'LENGTH = 1792K' $@ || \
-	  (echo "Failed to reserve final 256 KiB flash for TNC155 NVRAM" >&2; exit 1)
+$(LDSCRIPT): $(LDSCRIPT_BASE) tools/make_tnc155_linker.py | $(BUILD_DIR)
+	python3 tools/make_tnc155_linker.py "$<" "$@"
 
 $(BUILD_DIR)/%.o: %.c Makefile.tnc155
 	@mkdir -p $(dir $@)
@@ -230,6 +220,12 @@ $(BUILD_DIR)/%.o: %.c Makefile.tnc155
 $(BUILD_DIR)/%.o: %.s Makefile.tnc155
 	@mkdir -p $(dir $@)
 	$(AS) -c $(ASFLAGS) $< -o $@
+
+# Must precede the generic external-source rule: no LTO for this object so the
+# linker script can move its .text* and .rodata* sections into the TCMs.
+$(TMS9995_OBJECT): $(TNC155_DIR)/src/cpu/tms9995.c Makefile.tnc155 $(TNC155_ROM_HEADER)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(TMS9995_CFLAGS) -Wa,-a,-ad,-alms=$(patsubst %.o,%.lst,$@) $< -o $@
 
 $(BUILD_DIR)/tnc155/%.o: $(TNC155_DIR)/%.c Makefile.tnc155 $(TNC155_ROM_HEADER)
 	@mkdir -p $(dir $@)
