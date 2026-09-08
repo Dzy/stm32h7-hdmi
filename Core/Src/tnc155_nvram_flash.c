@@ -14,6 +14,8 @@
 #define TNC155_NVRAM_MAGIC          0x544E4331u /* "TNC1" */
 #define TNC155_NVRAM_VERSION        1u
 #define TNC155_FLASHWORD_SIZE       32u
+#define TNC155_NVRAM_SAVE_QUIET_MS  5000u
+#define TNC155_NVRAM_RETRY_MS       10000u
 
 /* STM32H743 programs Bank 2 in 256-bit flash words.  The header is written
    last, after the complete payload, so a reset or power loss can never turn a
@@ -31,6 +33,12 @@ _Static_assert(sizeof(tnc155_nvram_header) == TNC155_FLASHWORD_SIZE,
                "NVRAM header must occupy one H7 flash word");
 
 static uint32_t s_last_error;
+static uint32_t s_sequence;
+static uint32_t s_save_due_ms;
+static uint32_t s_save_count;
+static uint32_t s_save_error_count;
+static bool s_loaded_from_flash;
+static bool s_save_pending;
 
 static uint32_t crc32_bytes(const uint8_t *data, size_t size)
 {
@@ -236,4 +244,83 @@ out:
 uint32_t TNC155_NVRAM_Flash_LastError(void)
 {
     return s_last_error;
+}
+
+bool TNC155_NVRAM_Init(tnc155_mainboard *board,
+                       const uint8_t *fallback, size_t fallback_size)
+{
+    uint32_t now;
+
+    if (board == NULL || fallback == NULL ||
+        fallback_size != sizeof(board->user_ram))
+        return false;
+
+    s_last_error = 0u;
+    s_sequence = 0u;
+    s_save_count = 0u;
+    s_save_error_count = 0u;
+    s_loaded_from_flash = TNC155_NVRAM_Flash_Load(
+        board->user_ram, sizeof(board->user_ram), &s_sequence);
+
+    if (!s_loaded_from_flash)
+        memcpy(board->user_ram, fallback, sizeof(board->user_ram));
+
+    board->user_ram_loaded = true;
+    board->user_ram_dirty = false;
+
+    /* Seed a persistent slot after first installation.  Any TNC writes during
+       boot simply postpone this until the RAM has been quiet for 5 seconds. */
+    now = HAL_GetTick();
+    s_save_pending = !s_loaded_from_flash;
+    s_save_due_ms = now + TNC155_NVRAM_SAVE_QUIET_MS;
+    return true;
+}
+
+void TNC155_NVRAM_Task(tnc155_mainboard *board)
+{
+    uint32_t now;
+
+    if (board == NULL || !board->user_ram_loaded)
+        return;
+
+    now = HAL_GetTick();
+    if (board->user_ram_dirty) {
+        /* Consume the edge.  Any later write sets it again and restarts the
+           quiet timer, coalescing byte writes into one sector transaction. */
+        board->user_ram_dirty = false;
+        s_save_pending = true;
+        s_save_due_ms = now + TNC155_NVRAM_SAVE_QUIET_MS;
+    }
+
+    if (!s_save_pending || (int32_t)(now - s_save_due_ms) < 0)
+        return;
+
+    if (TNC155_NVRAM_Flash_Save(board->user_ram, sizeof(board->user_ram),
+                                &s_sequence)) {
+        ++s_save_count;
+        s_save_pending = false;
+    } else {
+        ++s_save_error_count;
+        s_save_due_ms = HAL_GetTick() + TNC155_NVRAM_RETRY_MS;
+    }
+}
+
+bool TNC155_NVRAM_LoadedFromFlash(void)
+{
+    return s_loaded_from_flash;
+}
+
+uint32_t TNC155_NVRAM_Sequence(void)
+{
+    return s_sequence;
+}
+
+uint32_t TNC155_NVRAM_SaveCount(void)
+{
+    return s_save_count;
+}
+
+uint32_t TNC155_NVRAM_SaveErrorCount(void)
+{
+    return s_save_error_count;
 }
