@@ -232,11 +232,9 @@ uint32_t TNC155_NVRAM_Flash_LastError(void)
     return s_last_error;
 }
 
-bool TNC155_NVRAM_Init(tnc155_mainboard *board,
-                       const uint8_t *factory_image, size_t factory_size)
+bool TNC155_NVRAM_Init(tnc155_mainboard *board)
 {
-    if (board == NULL || factory_image == NULL ||
-        factory_size != sizeof(board->user_ram))
+    if (board == NULL)
         return false;
 
     s_last_error = 0u;
@@ -244,20 +242,11 @@ bool TNC155_NVRAM_Init(tnc155_mainboard *board,
     s_save_count = 0u;
     s_save_error_count = 0u;
     s_save_pending = false;
+    s_loaded_from_flash = TNC155_NVRAM_Flash_Load(
+        board->user_ram, sizeof(board->user_ram), &s_sequence);
+    if (!s_loaded_from_flash)
+        return false;
 
-    if (!TNC155_NVRAM_Flash_Load(board->user_ram, sizeof(board->user_ram),
-                                 &s_sequence)) {
-        uint32_t seed_sequence = 0u;
-        if (!TNC155_NVRAM_Flash_Save(factory_image, factory_size,
-                                     &seed_sequence))
-            return false;
-        s_sequence = seed_sequence;
-        if (!TNC155_NVRAM_Flash_Load(board->user_ram,
-                                     sizeof(board->user_ram), &s_sequence))
-            return false;
-    }
-
-    s_loaded_from_flash = true;
     s_persisted_crc = crc32_bytes(board->user_ram, sizeof(board->user_ram));
     board->user_ram_loaded = true;
     board->user_ram_dirty = false;
