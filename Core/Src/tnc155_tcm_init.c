@@ -36,6 +36,12 @@ static void zero_region(uint8_t *start, uint8_t *end)
 
 static void TNC155_TCM_Init(void)
 {
+    /* Do not depend on reset-state implementation details. */
+    SCB->ITCMCR |= SCB_ITCMCR_EN_Msk;
+    SCB->DTCMCR |= SCB_DTCMCR_EN_Msk;
+    __DSB();
+    __ISB();
+
     copy_region(__tnc155_itcm_start__, __tnc155_itcm_load__,
                 __tnc155_itcm_end__);
     copy_region(__tnc155_dtcm_start__, __tnc155_dtcm_load__,
