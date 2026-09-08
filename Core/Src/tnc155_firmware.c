@@ -19,7 +19,9 @@
 #define TNC155_VIDEO_MIN_PERIOD_MS   20U
 #define TNC155_DEBUG_PERIOD_MS       200U
 #define TNC155_STEP_SLICE            4096U
-#define TNC155_CATCHUP_LIMIT_CYCLES  (TNC155_MAIN_CPU_CLOCK_HZ / 10U)
+#define TNC155_HW_TICK_HZ            1000U
+#define TNC155_DEC_TICKS_PER_MS      (TNC155_MAIN_CPU_CLOCK_HZ / 16000U)
+#define TNC155_PENDING_LEVEL3        (1U << 2)
 
 #define HDMI_WIDTH  1920U
 #define HDMI_HEIGHT 1080U
@@ -64,6 +66,8 @@ _Static_assert(TNC_NATIVE_BYTES <= (512U * 1024U),
                "TNC155 native staging image does not fit AXI SRAM");
 _Static_assert((offsetof(tnc155_upd7220, scanout_character_video) & 3u) == 0u,
                "uPD7220 scanout must be 32-bit aligned");
+_Static_assert((TNC155_MAIN_CPU_CLOCK_HZ % 16000U) == 0U,
+               "1 ms hardware tick must map exactly to TMS9995 decrementer ticks");
 
 static tnc155_machine *const s_machine =
     (tnc155_machine *)(uintptr_t)TNC155_MACHINE_ADDRESS;
@@ -78,13 +82,13 @@ static tnc155_serial_keyboard s_keyboard;
 static uint32_t s_text_row_lut[4][256][4];
 static uint32_t s_graphics_byte_lut[256][2];
 
-static uint32_t s_epoch_ms;
-static uint64_t s_epoch_cycles;
 static uint32_t s_next_video_ms;
 static uint32_t s_next_debug_ms;
 static uint32_t s_rendered_fifo_entries;
 static uint32_t s_rendered_words_written;
 static uint32_t s_rendered_scanout_commits;
+static volatile uint32_t s_pending_hw_ms;
+static volatile uint8_t s_hw_time_active;
 static volatile uint8_t s_front_fb;
 static volatile uint8_t s_pending_fb;
 static volatile uint8_t s_swap_pending;
@@ -238,25 +242,11 @@ static void debug_draw_line(uint8_t *dst, unsigned line, const char *text)
                     DEBUG_Y + 5u + line * (8u * DEBUG_SCALE), text);
 }
 
-static uint64_t slowest_machine_cycles(void)
-{
-    return s_machine->main.cpu.cycles < s_machine->clp.cpu.cycles ?
-           s_machine->main.cpu.cycles : s_machine->clp.cpu.cycles;
-}
-
 static void draw_debug_overlay(uint8_t *dst)
 {
     char line[64];
     char *p;
     uint32_t now_ms = HAL_GetTick();
-    uint64_t expected_cycles = s_epoch_cycles +
-        (uint64_t)(now_ms - s_epoch_ms) *
-        (TNC155_MAIN_CPU_CLOCK_HZ / 1000u);
-    uint64_t slowest = slowest_machine_cycles();
-    uint64_t lag_cycles = expected_cycles > slowest ?
-                          expected_cycles - slowest : 0u;
-    uint32_t lag_ms = (uint32_t)(lag_cycles /
-                                 (TNC155_MAIN_CPU_CLOCK_HZ / 1000u));
     unsigned y;
 
     for (y = DEBUG_Y; y < DEBUG_Y + DEBUG_H; ++y)
@@ -283,17 +273,15 @@ static void draw_debug_overlay(uint8_t *dst)
     *p = '\0';
     debug_draw_line(dst, 2u, line);
 
-    p = debug_append_text(line, "MAIN C=");
-    p = debug_append_hex32(p, (uint32_t)s_machine->main.cpu.cycles);
-    p = debug_append_text(p, " CLP C=");
-    p = debug_append_hex32(p, (uint32_t)s_machine->clp.cpu.cycles);
+    p = debug_append_text(line, "ALT=1 HWMS=");
+    p = debug_append_u32(p, now_ms);
     *p = '\0';
     debug_draw_line(dst, 3u, line);
 
-    p = debug_append_text(line, "LAGMS=");
-    p = debug_append_u32(p, lag_ms);
-    p = debug_append_text(p, " TICK=");
-    p = debug_append_hex32(p, now_ms);
+    p = debug_append_text(line, "PEND=");
+    p = debug_append_u32(p, s_pending_hw_ms);
+    p = debug_append_text(p, " STEP=");
+    p = debug_append_u32(p, TNC155_STEP_SLICE);
     *p = '\0';
     debug_draw_line(dst, 4u, line);
 
@@ -733,28 +721,92 @@ static void remember_rendered_gdc_state(void)
     s_rendered_scanout_commits = gdc->scanout_commits;
 }
 
+/* In STM32 firmware the TMS9995 internal decrementer is driven from the real
+   1 kHz Cortex SysTick timebase, not from guest instruction cycle accounting.
+   At a 12 MHz TMS input clock the decrementer advances at 12 MHz / 16 =
+   750 kHz, exactly 750 ticks per millisecond.  Multiple expiries collapse
+   naturally into the level-3 pending latch, so a whole elapsed interval can
+   be applied in O(1) time. */
+static void advance_decrementer_hw_ms(tms9995 *cpu, uint32_t elapsed_ms)
+{
+    uint64_t ticks;
+    uint32_t current;
+    uint32_t reload;
+    uint32_t remainder;
+
+    if (cpu == NULL || elapsed_ms == 0u ||
+        (cpu->flags & 0x0002u) == 0u ||
+        (cpu->flags & 0x0001u) != 0u ||
+        cpu->decrementer_value == 0u)
+        return;
+
+    ticks = (uint64_t)elapsed_ms * TNC155_DEC_TICKS_PER_MS;
+    current = cpu->decrementer_value;
+    if (ticks < current) {
+        cpu->decrementer_value = (uint16_t)(current - (uint32_t)ticks);
+        return;
+    }
+
+    ticks -= current;
+    cpu->pending_interrupts |= TNC155_PENDING_LEVEL3;
+    reload = cpu->decrementer_start;
+    if (reload == 0u) {
+        cpu->decrementer_value = 0u;
+        return;
+    }
+
+    remainder = (uint32_t)(ticks % reload);
+    cpu->decrementer_value = (uint16_t)(remainder == 0u ?
+                                        reload : reload - remainder);
+}
+
+static uint32_t take_pending_hw_ms(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    uint32_t elapsed;
+
+    __disable_irq();
+    elapsed = s_pending_hw_ms;
+    s_pending_hw_ms = 0u;
+    if (primask == 0u)
+        __enable_irq();
+    return elapsed;
+}
+
+static void service_hardware_time(void)
+{
+    uint32_t elapsed = take_pending_hw_ms();
+    uint32_t i;
+
+    if (elapsed == 0u)
+        return;
+
+    /* Board wiring, emergency monoflops and other millisecond-scale physical
+       effects keep their exact real-time source.  This loop normally runs
+       once; it only catches up if a long render/USB operation delayed the
+       foreground task. */
+    for (i = 0u; i < elapsed; ++i)
+        tnc155_machine_service_1ms(s_machine);
+
+    advance_decrementer_hw_ms(&s_machine->main.cpu, elapsed);
+    advance_decrementer_hw_ms(&s_machine->clp.cpu, elapsed);
+}
+
 static void run_machine_slice(void)
 {
     uint32_t start_core_cycles = DWT->CYCCNT;
-    uint32_t now_ms = HAL_GetTick();
-    uint64_t target_cycles = s_epoch_cycles +
-        (uint64_t)(now_ms - s_epoch_ms) *
-        (TNC155_MAIN_CPU_CLOCK_HZ / 1000u);
-    uint64_t slowest = slowest_machine_cycles();
-    unsigned steps = 0u;
+    unsigned steps;
 
-    if (target_cycles > slowest + TNC155_CATCHUP_LIMIT_CYCLES)
-        target_cycles = slowest + TNC155_CATCHUP_LIMIT_CYCLES;
-
-    while (steps < TNC155_STEP_SLICE &&
-           (s_machine->main.cpu.cycles < target_cycles ||
-            s_machine->clp.cpu.cycles < target_cycles)) {
+    /* Run flat out.  tnc155_machine_step() provides a fixed MAIN/CLP
+       instruction interleave in TNC155_FIRMWARE builds; no guest-cycle
+       comparison, catch-up target or 12 MHz software throttling remains in
+       this hot loop. */
+    for (steps = 0u; steps < TNC155_STEP_SLICE; ++steps) {
         tms9995_step_result result = tnc155_machine_step(s_machine, NULL);
         if (result != TMS9995_STEP_OK && result != TMS9995_STEP_IDLE) {
             g_tnc155_faulted = 1u;
             break;
         }
-        ++steps;
     }
 
     g_tnc155_last_slice_core_cycles = DWT->CYCCNT - start_core_cycles;
@@ -815,9 +867,10 @@ static bool present_frame(bool redraw_tnc)
 
 bool TNC155_Firmware_Init(void)
 {
-    uint64_t slowest;
     uint32_t now;
 
+    s_hw_time_active = 0u;
+    s_pending_hw_ms = 0u;
     g_tnc155_faulted = 0u;
     g_tnc155_last_slice_core_cycles = 0u;
     g_tnc155_max_slice_core_cycles = 0u;
@@ -853,10 +906,7 @@ bool TNC155_Firmware_Init(void)
     tnc155_serial_keyboard_init(&s_keyboard);
     TNC155_USB_CDC_Init(&s_keyboard, &s_machine->main.keyboard);
 
-    slowest = slowest_machine_cycles();
     now = HAL_GetTick();
-    s_epoch_ms = now;
-    s_epoch_cycles = slowest;
     s_next_video_ms = now + TNC155_VIDEO_MIN_PERIOD_MS;
     s_next_debug_ms = now + TNC155_DEBUG_PERIOD_MS;
 
@@ -868,6 +918,12 @@ bool TNC155_Firmware_Init(void)
     if (!present_frame(true))
         return false;
     remember_rendered_gdc_state();
+
+    /* Start physical-time accounting only after all emulated state and video
+       initialization is complete.  SysTick from this point is the timing
+       authority for watchdogs and decrementers. */
+    s_pending_hw_ms = 0u;
+    s_hw_time_active = 1u;
     return true;
 }
 
@@ -879,6 +935,7 @@ void TNC155_Firmware_Task(void)
     bool debug_due;
     bool redraw_tnc;
 
+    service_hardware_time();
     TNC155_USB_CDC_Task();
 
     if (g_tnc155_faulted == 0u)
@@ -899,6 +956,14 @@ void TNC155_Firmware_Task(void)
             s_next_debug_ms = now + TNC155_DEBUG_PERIOD_MS;
         }
     }
+}
+
+void TNC155_Firmware_SysTickISR(void)
+{
+    /* Keep the ISR constant-time and independent of SDRAM/emulator state.
+       Foreground consumes this hardware-derived elapsed time in batches. */
+    if (s_hw_time_active != 0u && s_pending_hw_ms != UINT32_MAX)
+        ++s_pending_hw_ms;
 }
 
 void TNC155_Firmware_LTDCReloadComplete(void)
