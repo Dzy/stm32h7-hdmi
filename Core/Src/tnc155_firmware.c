@@ -8,24 +8,21 @@
 #include "tnc155_default_user_ram.h"
 #include "tnc155_usb_cdc.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#define TNC155_STAGE_ADDRESS       (SDRAM_BASE_ADDRESS + (8U * 1024U * 1024U))
-#define TNC155_MACHINE_ADDRESS     (SDRAM_BASE_ADDRESS + (10U * 1024U * 1024U))
-/* HDMI remains 1080p60.  Rendering the emulated TNC surface at 25 Hz halves
-   the expensive software scanout/conversion load without changing HDMI timing. */
-#define TNC155_FRAME_PERIOD_MS     40U
-/* A 256-instruction slice required several thousand superloop/TinyUSB passes
-   per second to sustain two 12 MHz TMS9995s.  A larger catch-up slice keeps
-   CDC latency in the millisecond range while removing that artificial
-   throughput bottleneck. */
-#define TNC155_STEP_SLICE          4096U
-#define TNC155_CATCHUP_LIMIT_CYCLES (TNC155_MAIN_CPU_CLOCK_HZ / 10U)
+#define TNC155_MACHINE_ADDRESS       (SDRAM_BASE_ADDRESS + (10U * 1024U * 1024U))
+#define TNC155_VIDEO_MIN_PERIOD_MS   20U
+#define TNC155_DEBUG_PERIOD_MS       200U
+#define TNC155_STEP_SLICE            4096U
+#define TNC155_CATCHUP_LIMIT_CYCLES  (TNC155_MAIN_CPU_CLOCK_HZ / 10U)
 
 #define HDMI_WIDTH  1920U
 #define HDMI_HEIGHT 1080U
+#define TNC_X0      ((HDMI_WIDTH - TNC155_VIDEO_WIDTH) / 2U)
+#define TNC_Y0_MAX  ((HDMI_HEIGHT - TNC155_VIDEO_HEIGHT) / 2U)
 
 #define DEBUG_X       12U
 #define DEBUG_Y       12U
@@ -35,24 +32,32 @@
 #define DEBUG_FG      0xffU
 #define DEBUG_BG      0x00U
 
-_Static_assert((TNC155_STAGE_ADDRESS +
-                TNC155_VIDEO_WIDTH * TNC155_VIDEO_HEIGHT * sizeof(uint32_t)) <=
-               TNC155_MACHINE_ADDRESS,
-               "TNC155 ARGB staging buffer overlaps machine state");
+/* These are the RGB332 indices obtained from the original ARGB phosphor
+   colours.  Keeping the existing 256-entry RGB332 CLUT also leaves index
+   0xff available as white for the diagnostic overlay. */
+enum {
+    TNC_L8_BLACK  = 0x00,
+    TNC_L8_BRIGHT = 0xdf,
+    TNC_L8_DARK   = 0x04,
+    TNC_L8_DIM    = 0x71
+};
+
 _Static_assert((TNC155_MACHINE_ADDRESS + sizeof(tnc155_machine)) <=
                (SDRAM_BASE_ADDRESS + SDRAM_SIZE_BYTES),
                "TNC155 machine state does not fit external SDRAM");
 _Static_assert(LTDC_VID_FORMAT == 8U,
-               "TNC155 firmware currently targets the 1920x1080p60 mode");
+               "TNC155 firmware currently targets the 1920x1080p60 L8 mode");
 
 static tnc155_machine *const s_machine =
     (tnc155_machine *)(uintptr_t)TNC155_MACHINE_ADDRESS;
-static uint32_t *const s_stage =
-    (uint32_t *)(uintptr_t)TNC155_STAGE_ADDRESS;
 static tnc155_serial_keyboard s_keyboard;
 static uint32_t s_epoch_ms;
 static uint64_t s_epoch_cycles;
-static uint32_t s_next_frame_ms;
+static uint32_t s_next_video_ms;
+static uint32_t s_next_debug_ms;
+static uint32_t s_rendered_fifo_entries;
+static uint32_t s_rendered_words_written;
+static uint32_t s_rendered_scanout_commits;
 static volatile uint8_t s_front_fb;
 static volatile uint8_t s_pending_fb;
 static volatile uint8_t s_swap_pending;
@@ -300,14 +305,6 @@ static void draw_debug_overlay(uint8_t *dst)
     debug_draw_line(dst, 8u, line);
 }
 
-static uint8_t rgb332_from_argb(uint32_t argb)
-{
-    uint8_t r = (uint8_t)(argb >> 16);
-    uint8_t g = (uint8_t)(argb >> 8);
-    uint8_t b = (uint8_t)argb;
-    return (uint8_t)((r & 0xe0u) | ((g >> 3) & 0x1cu) | (b >> 6));
-}
-
 static void load_rgb332_clut(void)
 {
     uint32_t clut[256];
@@ -341,6 +338,178 @@ static void clear_framebuffer(uint32_t address)
     __DSB();
 }
 
+typedef struct tnc_l8_partition {
+    uint32_t start;
+    uint16_t length;
+    bool graphics;
+} tnc_l8_partition;
+
+static tnc_l8_partition decode_partition(const tnc155_upd7220 *gdc,
+                                         unsigned area)
+{
+    unsigned base = area * 4u;
+    tnc_l8_partition part;
+    uint8_t b0 = gdc->parameter_ram[base + 0u];
+    uint8_t b1 = gdc->parameter_ram[base + 1u];
+    uint8_t b2 = gdc->parameter_ram[base + 2u];
+    uint8_t b3 = gdc->parameter_ram[base + 3u];
+
+    if (gdc->display_mode == TNC155_GDC_MODE_CHARACTER)
+        part.start = (uint32_t)b0 | ((uint32_t)(b1 & 0x1fu) << 8);
+    else
+        part.start = (uint32_t)b0 | ((uint32_t)b1 << 8) |
+                     ((uint32_t)(b2 & 3u) << 16);
+    part.length = (uint16_t)((b2 >> 4) | ((uint16_t)(b3 & 0x3fu) << 4));
+    part.graphics = gdc->display_mode == TNC155_GDC_MODE_GRAPHICS ||
+                    (gdc->display_mode == TNC155_GDC_MODE_MIXED &&
+                     (b3 & 0x40u) != 0u);
+    return part;
+}
+
+static bool locate_scanline(const tnc155_upd7220 *gdc, unsigned y,
+                            tnc_l8_partition *part, unsigned *local_y)
+{
+    unsigned area;
+    unsigned base_y = 0u;
+    unsigned active = gdc->active_lines != 0u ? gdc->active_lines :
+        (gdc->display_mode == TNC155_GDC_MODE_GRAPHICS ?
+         TNC155_VIDEO_GRAPHICS_HEIGHT : TNC155_VIDEO_TEXT_HEIGHT);
+
+    for (area = 0u; area < 4u && base_y < active; ++area) {
+        tnc_l8_partition candidate = decode_partition(gdc, area);
+        unsigned length = candidate.length;
+        if (length == 0u && candidate.graphics)
+            length = 0x400u;
+        if (length == 0u)
+            continue;
+        if (length > active - base_y)
+            length = active - base_y;
+        if (y >= base_y && y < base_y + length) {
+            *part = candidate;
+            part->length = (uint16_t)length;
+            *local_y = y - base_y;
+            return true;
+        }
+        base_y += length;
+    }
+    return false;
+}
+
+static void render_tnc_l8(uint8_t *dst)
+{
+    static const uint8_t phosphor[4] = {
+        TNC_L8_BLACK, TNC_L8_BRIGHT, TNC_L8_DARK, TNC_L8_DIM
+    };
+    const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
+    unsigned active_height = tnc155_video_active_height(s_machine);
+    unsigned line_height = gdc->lines_per_character != 0u ?
+                           gdc->lines_per_character : 1u;
+    unsigned dst_y0;
+    unsigned y;
+
+    if (active_height > TNC155_VIDEO_HEIGHT)
+        active_height = TNC155_VIDEO_HEIGHT;
+
+    /* Always clear the maximum TNC rectangle; 468/490-line mode transitions
+       then cannot leave stale scanlines in the framebuffer. */
+    for (y = 0u; y < TNC155_VIDEO_HEIGHT; ++y)
+        memset(dst + (size_t)(TNC_Y0_MAX + y) * HDMI_WIDTH + TNC_X0,
+               TNC_L8_BLACK, TNC155_VIDEO_WIDTH);
+
+    if (!gdc->display_enabled)
+        return;
+
+    dst_y0 = (HDMI_HEIGHT - active_height) / 2u;
+    for (y = 0u; y < active_height; ++y) {
+        tnc_l8_partition part;
+        unsigned local_y;
+        unsigned effective_pitch;
+        uint8_t *row;
+        unsigned word_column;
+
+        if (!locate_scanline(gdc, y, &part, &local_y))
+            continue;
+
+        row = dst + (size_t)(dst_y0 + y) * HDMI_WIDTH + TNC_X0;
+        effective_pitch = gdc->pitch != 0u ? gdc->pitch : 1u;
+
+        if (!part.graphics) {
+            uint32_t line_base = part.start +
+                (local_y / line_height) * effective_pitch;
+
+            for (word_column = 0u; word_column < 32u; ++word_column) {
+                uint32_t word = (line_base + word_column) & 0x7fffu;
+                uint16_t cell = (uint16_t)(
+                    (uint16_t)gdc->scanout_character_video[word * 2u] << 8 |
+                    gdc->scanout_character_video[word * 2u + 1u]);
+                uint8_t ascii = (uint8_t)cell;
+                uint8_t mode_data = (uint8_t)(cell >> 8);
+                unsigned p1_mode = (mode_data >> 2) & 0x07u;
+                uint8_t glyph = tnc155_clp_font_row(
+                    p1_mode, ascii & 0x3fu, local_y % line_height);
+                bool inverse = (mode_data & 0x01u) != 0u;
+                unsigned colour_base = (mode_data & 0x02u) != 0u ? 2u : 0u;
+                unsigned bit;
+                uint8_t *cell_dst = row + word_column * 16u;
+
+                for (bit = 0u; bit < 8u; ++bit) {
+                    bool set = (glyph & (uint8_t)(0x80u >> bit)) != 0u;
+                    uint8_t colour;
+                    if (inverse)
+                        set = !set;
+                    colour = phosphor[colour_base | (set ? 1u : 0u)];
+                    cell_dst[bit * 2u] = colour;
+                    cell_dst[bit * 2u + 1u] = colour;
+                }
+            }
+        } else {
+            unsigned pitch = effective_pitch;
+            if (gdc->display_mode == TNC155_GDC_MODE_MIXED)
+                pitch >>= 1;
+            if (pitch == 0u)
+                pitch = 1u;
+
+            for (word_column = 0u; word_column < 32u; ++word_column) {
+                uint32_t word = (part.start + local_y * pitch + word_column) &
+                                0x7fffu;
+                uint16_t bits = (uint16_t)(
+                    (uint16_t)gdc->scanout_character_video[word * 2u] << 8 |
+                    gdc->scanout_character_video[word * 2u + 1u]);
+                unsigned bit;
+                uint8_t *word_dst = row + word_column * 16u;
+                for (bit = 0u; bit < 16u; ++bit)
+                    word_dst[bit] = (bits & (uint16_t)(1u << bit)) != 0u ?
+                                    TNC_L8_BRIGHT : TNC_L8_BLACK;
+            }
+        }
+    }
+}
+
+static void copy_tnc_l8(uint8_t *dst, const uint8_t *src)
+{
+    unsigned y;
+    for (y = 0u; y < TNC155_VIDEO_HEIGHT; ++y) {
+        size_t offset = (size_t)(TNC_Y0_MAX + y) * HDMI_WIDTH + TNC_X0;
+        memcpy(dst + offset, src + offset, TNC155_VIDEO_WIDTH);
+    }
+}
+
+static bool gdc_video_dirty(void)
+{
+    const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
+    return gdc->fifo_entries_processed != s_rendered_fifo_entries ||
+           gdc->words_written != s_rendered_words_written ||
+           gdc->scanout_commits != s_rendered_scanout_commits;
+}
+
+static void remember_rendered_gdc_state(void)
+{
+    const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
+    s_rendered_fifo_entries = gdc->fifo_entries_processed;
+    s_rendered_words_written = gdc->words_written;
+    s_rendered_scanout_commits = gdc->scanout_commits;
+}
+
 static void run_machine_slice(void)
 {
     uint32_t start_core_cycles = DWT->CYCCNT;
@@ -370,45 +539,25 @@ static void run_machine_slice(void)
         g_tnc155_max_slice_core_cycles = g_tnc155_last_slice_core_cycles;
 }
 
-static void render_frame(void)
+static bool present_frame(bool redraw_tnc)
 {
     uint32_t start_core_cycles;
     uint8_t back_fb;
     uint8_t *dst;
-    unsigned active_height;
-    unsigned src_y;
-    unsigned dst_y0;
-    unsigned x;
-    unsigned y;
 
     if (s_swap_pending != 0u)
-        return;
+        return false;
 
     start_core_cycles = DWT->CYCCNT;
     back_fb = (uint8_t)(s_front_fb ^ 1u);
     dst = (uint8_t *)(uintptr_t)framebuffer_address(back_fb);
-    active_height = tnc155_video_active_height(s_machine);
-    if (active_height > TNC155_VIDEO_HEIGHT)
-        active_height = TNC155_VIDEO_HEIGHT;
 
-    tnc155_video_render(s_machine, s_stage, TNC155_VIDEO_WIDTH, false);
-
-    for (y = 0u; y < TNC155_VIDEO_HEIGHT; ++y) {
-        unsigned dy = (HDMI_HEIGHT - TNC155_VIDEO_HEIGHT) / 2u + y;
-        memset(dst + (size_t)dy * HDMI_WIDTH +
-               (HDMI_WIDTH - TNC155_VIDEO_WIDTH) / 2u,
-               0, TNC155_VIDEO_WIDTH);
-    }
-
-    dst_y0 = (HDMI_HEIGHT - active_height) / 2u;
-    src_y = 0u;
-    for (y = 0u; y < active_height; ++y, ++src_y) {
-        uint8_t *row = dst + (size_t)(dst_y0 + y) * HDMI_WIDTH +
-                       (HDMI_WIDTH - TNC155_VIDEO_WIDTH) / 2u;
-        const uint32_t *src = s_stage +
-                              (size_t)src_y * TNC155_VIDEO_WIDTH;
-        for (x = 0u; x < TNC155_VIDEO_WIDTH; ++x)
-            row[x] = rgb332_from_argb(src[x]);
+    if (redraw_tnc) {
+        render_tnc_l8(dst);
+    } else {
+        const uint8_t *front =
+            (const uint8_t *)(uintptr_t)framebuffer_address(s_front_fb);
+        copy_tnc_l8(dst, front);
     }
 
     draw_debug_overlay(dst);
@@ -417,7 +566,7 @@ static void render_frame(void)
     if (HAL_LTDC_SetAddress_NoReload(&hltdc, framebuffer_address(back_fb), 0u)
             != HAL_OK) {
         g_tnc155_faulted = 1u;
-        return;
+        return false;
     }
 
     s_pending_fb = back_fb;
@@ -425,15 +574,17 @@ static void render_frame(void)
     if (HAL_LTDC_Reload(&hltdc, LTDC_RELOAD_VERTICAL_BLANKING) != HAL_OK) {
         s_swap_pending = 0u;
         g_tnc155_faulted = 1u;
-        return;
+        return false;
     }
 
     g_tnc155_last_frame_core_cycles = DWT->CYCCNT - start_core_cycles;
+    return true;
 }
 
 bool TNC155_Firmware_Init(void)
 {
     uint64_t slowest;
+    uint32_t now;
 
     g_tnc155_faulted = 0u;
     g_tnc155_last_slice_core_cycles = 0u;
@@ -467,17 +618,30 @@ bool TNC155_Firmware_Init(void)
     TNC155_USB_CDC_Init(&s_keyboard, &s_machine->main.keyboard);
 
     slowest = slowest_machine_cycles();
-    s_epoch_ms = HAL_GetTick();
+    now = HAL_GetTick();
+    s_epoch_ms = now;
     s_epoch_cycles = slowest;
-    s_next_frame_ms = s_epoch_ms;
+    s_next_video_ms = now + TNC155_VIDEO_MIN_PERIOD_MS;
+    s_next_debug_ms = now + TNC155_DEBUG_PERIOD_MS;
 
-    render_frame();
+    /* Force the first frame to establish both the TNC image and the initial
+       GDC generation snapshot. */
+    s_rendered_fifo_entries = UINT32_MAX;
+    s_rendered_words_written = UINT32_MAX;
+    s_rendered_scanout_commits = UINT32_MAX;
+    if (!present_frame(true))
+        return false;
+    remember_rendered_gdc_state();
     return true;
 }
 
 void TNC155_Firmware_Task(void)
 {
     uint32_t now;
+    bool dirty;
+    bool video_due;
+    bool debug_due;
+    bool redraw_tnc;
 
     TNC155_USB_CDC_Task();
 
@@ -485,11 +649,19 @@ void TNC155_Firmware_Task(void)
         run_machine_slice();
 
     now = HAL_GetTick();
-    if ((int32_t)(now - s_next_frame_ms) >= 0) {
-        s_next_frame_ms += TNC155_FRAME_PERIOD_MS;
-        if ((int32_t)(now - s_next_frame_ms) >= 0)
-            s_next_frame_ms = now + TNC155_FRAME_PERIOD_MS;
-        render_frame();
+    dirty = gdc_video_dirty();
+    video_due = (int32_t)(now - s_next_video_ms) >= 0;
+    debug_due = (int32_t)(now - s_next_debug_ms) >= 0;
+    redraw_tnc = dirty && video_due;
+
+    if (s_swap_pending == 0u && (redraw_tnc || debug_due)) {
+        if (present_frame(redraw_tnc)) {
+            if (redraw_tnc) {
+                remember_rendered_gdc_state();
+                s_next_video_ms = now + TNC155_VIDEO_MIN_PERIOD_MS;
+            }
+            s_next_debug_ms = now + TNC155_DEBUG_PERIOD_MS;
+        }
     }
 }
 
