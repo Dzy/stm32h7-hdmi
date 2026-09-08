@@ -75,11 +75,16 @@ static void TNC155_ApplyAmberCLUT(void)
         clut[i] = (r << 16) | (g << 8) | b;
     }
 
-    /* Indices are defined by the direct L8 TNC renderer. */
-    clut[0x00u] = 0x000000u; /* black */
-    clut[0x04u] = 0x2a1800u; /* dark amber pedestal */
-    clut[0x71u] = 0x805000u; /* dim amber */
-    clut[0xdfu] = 0xffb000u; /* bright amber */
+    /* The real monitor has two ON intensities, not a four-level phosphor.
+       VIDEO=0 is black regardless of the brightness attribute.  VIDEO=1 is
+       either normal amber or the brighter amber level.  The direct L8
+       renderer still uses four electrical-combination indices, so collapse
+       the two OFF combinations to black and map the two ON combinations to
+       NORMAL and BRIGHT respectively.  Inverse only swaps VIDEO on/off. */
+    clut[0x00u] = 0x000000u; /* brightness=0, VIDEO=0: black */
+    clut[0x04u] = 0x000000u; /* brightness=1, VIDEO=0: black */
+    clut[0xdfu] = 0xd88900u; /* brightness=0, VIDEO=1: normal amber */
+    clut[0x71u] = 0xffc52au; /* brightness=1, VIDEO=1: bright amber */
     clut[0xffu] = 0xffffffu; /* debug text remains white */
 
     /* ConfigCLUT only writes CLUTWR entries and does not touch LTDC->SRCR.
