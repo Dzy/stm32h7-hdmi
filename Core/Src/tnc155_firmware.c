@@ -1,8 +1,10 @@
 #include "tnc155_firmware.h"
 
+#include "dma2d.h"
 #include "ltdc.h"
 #include "main.h"
 #include "tnc155/machine.h"
+#include "tnc155/roms.h"
 #include "tnc155/serial_keyboard.h"
 #include "tnc155/video.h"
 #include "tnc155_default_user_ram.h"
@@ -24,6 +26,15 @@
 #define TNC_X0      ((HDMI_WIDTH - TNC155_VIDEO_WIDTH) / 2U)
 #define TNC_Y0_MAX  ((HDMI_HEIGHT - TNC155_VIDEO_HEIGHT) / 2U)
 
+#define TNC_NATIVE_WIDTH        TNC155_VIDEO_WIDTH
+#define TNC_NATIVE_HEIGHT       TNC155_VIDEO_HEIGHT
+#define TNC_NATIVE_BYTES        ((size_t)TNC_NATIVE_WIDTH * TNC_NATIVE_HEIGHT)
+#define TNC_NATIVE_ADDRESS      AXI_SRAM_BASE_ADDRESS
+#define TNC_DMA2D_WIDTH         (TNC_NATIVE_WIDTH / 2U)
+#define TNC_DMA2D_FB_STRIDE     (HDMI_WIDTH / 2U)
+#define TNC_DMA2D_LINE_OFFSET   (TNC_DMA2D_FB_STRIDE - TNC_DMA2D_WIDTH)
+#define TNC_DMA2D_TIMEOUT_MS    10U
+
 #define DEBUG_X       12U
 #define DEBUG_Y       12U
 #define DEBUG_W       620U
@@ -32,7 +43,7 @@
 #define DEBUG_FG      0xffU
 #define DEBUG_BG      0x00U
 
-/* L8 values are CLUT indices, not four phosphor colours.  D1 selects the
+/* L8 values are CLUT indices, not four phosphor colours. D1 selects the
    brightness of an ON pixel; both OFF states are black. */
 enum {
     TNC_L8_OFF_NORMAL = 0x00,
@@ -46,10 +57,25 @@ _Static_assert((TNC155_MACHINE_ADDRESS + sizeof(tnc155_machine)) <=
                "TNC155 machine state does not fit external SDRAM");
 _Static_assert(LTDC_VID_FORMAT == 8U,
                "TNC155 firmware currently targets the 1920x1080p60 L8 mode");
+_Static_assert((TNC_NATIVE_WIDTH & 1U) == 0U && (HDMI_WIDTH & 1U) == 0U &&
+               (TNC_X0 & 1U) == 0U,
+               "DMA2D raw L8 blit requires even width and X alignment");
+_Static_assert(TNC_NATIVE_BYTES <= (512U * 1024U),
+               "TNC155 native staging image does not fit AXI SRAM");
 
 static tnc155_machine *const s_machine =
     (tnc155_machine *)(uintptr_t)TNC155_MACHINE_ADDRESS;
+static uint8_t *const s_native_frame =
+    (uint8_t *)(uintptr_t)TNC_NATIVE_ADDRESS;
 static tnc155_serial_keyboard s_keyboard;
+
+/* DTCM-resident expansion tables. A P1 row byte becomes sixteen final L8
+   bytes (each P1 bit is two output pixels). All eight P1 modes use the same
+   table, so the small-font vertical variants and large-font data remain
+   entirely ROM-defined. */
+static uint32_t s_text_row_lut[4][256][4];
+static uint32_t s_graphics_byte_lut[256][2];
+
 static uint32_t s_epoch_ms;
 static uint64_t s_epoch_cycles;
 static uint32_t s_next_video_ms;
@@ -330,11 +356,88 @@ static uint32_t framebuffer_address(uint8_t index)
     return index != 0u ? FRAMEBUFFER1_ADDRESS : FRAMEBUFFER0_ADDRESS;
 }
 
+static uint32_t framebuffer_tnc_address(uint8_t index)
+{
+    return framebuffer_address(index) +
+           (uint32_t)((size_t)TNC_Y0_MAX * HDMI_WIDTH + TNC_X0);
+}
+
 static void clear_framebuffer(uint32_t address)
 {
     memset((void *)(uintptr_t)address, 0,
            (size_t)HDMI_WIDTH * HDMI_HEIGHT);
     __DSB();
+}
+
+static void init_raster_luts(void)
+{
+    unsigned attr;
+    unsigned pattern;
+
+    for (attr = 0u; attr < 4u; ++attr) {
+        bool inverse = (attr & 1u) != 0u;
+        bool bright = (attr & 2u) != 0u;
+        uint8_t off = bright ? TNC_L8_OFF_BRIGHT : TNC_L8_OFF_NORMAL;
+        uint8_t on = bright ? TNC_L8_ON_BRIGHT : TNC_L8_ON_NORMAL;
+
+        for (pattern = 0u; pattern < 256u; ++pattern) {
+            uint8_t *expanded = (uint8_t *)&s_text_row_lut[attr][pattern][0];
+            unsigned bit;
+            for (bit = 0u; bit < 8u; ++bit) {
+                bool set = (pattern & (0x80u >> bit)) != 0u;
+                uint8_t colour;
+                if (inverse)
+                    set = !set;
+                colour = set ? on : off;
+                expanded[bit * 2u] = colour;
+                expanded[bit * 2u + 1u] = colour;
+            }
+        }
+    }
+
+    for (pattern = 0u; pattern < 256u; ++pattern) {
+        uint8_t *expanded = (uint8_t *)&s_graphics_byte_lut[pattern][0];
+        unsigned bit;
+        for (bit = 0u; bit < 8u; ++bit)
+            expanded[bit] = (pattern & (1u << bit)) != 0u ?
+                            TNC_L8_ON_NORMAL : TNC_L8_OFF_NORMAL;
+    }
+}
+
+static bool configure_dma2d_raw_l8(void)
+{
+    hdma2d.Init.Mode = DMA2D_M2M;
+    hdma2d.Init.ColorMode = DMA2D_OUTPUT_RGB565;
+    hdma2d.Init.OutputOffset = TNC_DMA2D_LINE_OFFSET;
+    hdma2d.Init.AlphaInverted = DMA2D_REGULAR_ALPHA;
+    hdma2d.Init.RedBlueSwap = DMA2D_RB_REGULAR;
+    hdma2d.Init.BytesSwap = DMA2D_BYTES_REGULAR;
+    hdma2d.Init.LineOffsetMode = DMA2D_LOM_PIXELS;
+    hdma2d.LayerCfg[1].InputOffset = 0u;
+    hdma2d.LayerCfg[1].InputColorMode = DMA2D_INPUT_RGB565;
+    hdma2d.LayerCfg[1].AlphaMode = DMA2D_NO_MODIF_ALPHA;
+    hdma2d.LayerCfg[1].InputAlpha = 0xffu;
+    hdma2d.LayerCfg[1].AlphaInverted = DMA2D_REGULAR_ALPHA;
+    hdma2d.LayerCfg[1].RedBlueSwap = DMA2D_RB_REGULAR;
+    hdma2d.LayerCfg[1].ChromaSubSampling = DMA2D_NO_CSS;
+
+    return HAL_DMA2D_Init(&hdma2d) == HAL_OK &&
+           HAL_DMA2D_ConfigLayer(&hdma2d, 1u) == HAL_OK;
+}
+
+static bool dma2d_copy_tnc(uint32_t source, uint32_t destination,
+                           bool source_is_fullhd)
+{
+    /* RGB565 is deliberately only a 16-bit transport unit here. The two
+       bytes of each DMA2D pixel are two adjacent L8 pixels, and because input
+       and output formats are identical M2M performs no conversion. */
+    WRITE_REG(hdma2d.Instance->FGOR,
+              source_is_fullhd ? TNC_DMA2D_LINE_OFFSET : 0u);
+
+    if (HAL_DMA2D_Start(&hdma2d, source, destination,
+                        TNC_DMA2D_WIDTH, TNC_NATIVE_HEIGHT) != HAL_OK)
+        return false;
+    return HAL_DMA2D_PollForTransfer(&hdma2d, TNC_DMA2D_TIMEOUT_MS) == HAL_OK;
 }
 
 typedef struct tnc_l8_partition {
@@ -365,133 +468,142 @@ static tnc_l8_partition decode_partition(const tnc155_upd7220 *gdc,
     return part;
 }
 
-static bool locate_scanline(const tnc155_upd7220 *gdc, unsigned y,
-                            tnc_l8_partition *part, unsigned *local_y)
+static void render_text_partition(const tnc155_upd7220 *gdc,
+                                  const tnc155_rom_view *font,
+                                  const tnc_l8_partition *part,
+                                  unsigned dst_base_y, unsigned line_height,
+                                  unsigned effective_pitch)
 {
-    unsigned area;
-    unsigned base_y = 0u;
-    unsigned active = gdc->active_lines != 0u ? gdc->active_lines :
-        (gdc->display_mode == TNC155_GDC_MODE_GRAPHICS ?
-         TNC155_VIDEO_GRAPHICS_HEIGHT : TNC155_VIDEO_TEXT_HEIGHT);
+    unsigned cell_y;
 
-    for (area = 0u; area < 4u && base_y < active; ++area) {
-        tnc_l8_partition candidate = decode_partition(gdc, area);
-        unsigned length = candidate.length;
-        if (length == 0u && candidate.graphics)
-            length = 0x400u;
-        if (length == 0u)
-            continue;
-        if (length > active - base_y)
-            length = active - base_y;
-        if (y >= base_y && y < base_y + length) {
-            *part = candidate;
-            part->length = (uint16_t)length;
-            *local_y = y - base_y;
-            return true;
+    for (cell_y = 0u; cell_y < part->length; cell_y += line_height) {
+        unsigned cell_height = line_height;
+        uint32_t line_base;
+        unsigned word_column;
+
+        if (cell_height > (unsigned)part->length - cell_y)
+            cell_height = (unsigned)part->length - cell_y;
+        line_base = part->start + (cell_y / line_height) * effective_pitch;
+
+        for (word_column = 0u; word_column < 32u; ++word_column) {
+            uint32_t word = (line_base + word_column) & 0x7fffu;
+            uint16_t cell = (uint16_t)(
+                (uint16_t)gdc->scanout_character_video[word * 2u] << 8 |
+                gdc->scanout_character_video[word * 2u + 1u]);
+            uint8_t ascii = (uint8_t)cell;
+            uint8_t mode_data = (uint8_t)(cell >> 8);
+            unsigned p1_mode = (mode_data >> 2) & 0x07u;
+            unsigned attr = ((mode_data & 0x02u) != 0u ? 2u : 0u) |
+                            ((mode_data & 0x01u) != 0u ? 1u : 0u);
+            size_t glyph_base = ((size_t)p1_mode * 64u +
+                                 (ascii & 0x3fu)) * 32u;
+            unsigned row_in_cell;
+
+            for (row_in_cell = 0u; row_in_cell < cell_height; ++row_in_cell) {
+                uint8_t glyph = row_in_cell < 32u ?
+                                font->bytes[glyph_base + row_in_cell] : 0u;
+                const uint32_t *src = &s_text_row_lut[attr][glyph][0];
+                uint32_t *dst = (uint32_t *)(void *)(s_native_frame +
+                    (size_t)(dst_base_y + cell_y + row_in_cell) *
+                    TNC_NATIVE_WIDTH + word_column * 16u);
+
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+                dst[3] = src[3];
+            }
         }
-        base_y += length;
     }
-    return false;
 }
 
-static void render_tnc_l8(uint8_t *dst)
+static void render_graphics_partition(const tnc155_upd7220 *gdc,
+                                      const tnc_l8_partition *part,
+                                      unsigned dst_base_y,
+                                      unsigned effective_pitch)
 {
-    static const uint8_t phosphor[4] = {
-        TNC_L8_OFF_NORMAL, TNC_L8_ON_NORMAL,
-        TNC_L8_OFF_BRIGHT, TNC_L8_ON_BRIGHT
-    };
+    unsigned pitch = effective_pitch;
+    unsigned local_y;
+
+    if (gdc->display_mode == TNC155_GDC_MODE_MIXED)
+        pitch >>= 1;
+    if (pitch == 0u)
+        pitch = 1u;
+
+    for (local_y = 0u; local_y < part->length; ++local_y) {
+        uint8_t *row = s_native_frame +
+                       (size_t)(dst_base_y + local_y) * TNC_NATIVE_WIDTH;
+        uint32_t line_base = part->start + local_y * pitch;
+        unsigned word_column;
+
+        for (word_column = 0u; word_column < 32u; ++word_column) {
+            uint32_t word = (line_base + word_column) & 0x7fffu;
+            uint16_t bits = (uint16_t)(
+                (uint16_t)gdc->scanout_character_video[word * 2u] << 8 |
+                gdc->scanout_character_video[word * 2u + 1u]);
+            uint32_t *dst = (uint32_t *)(void *)(row + word_column * 16u);
+            const uint32_t *lo = &s_graphics_byte_lut[(uint8_t)bits][0];
+            const uint32_t *hi = &s_graphics_byte_lut[(uint8_t)(bits >> 8)][0];
+
+            dst[0] = lo[0];
+            dst[1] = lo[1];
+            dst[2] = hi[0];
+            dst[3] = hi[1];
+        }
+    }
+}
+
+static bool render_tnc_native(void)
+{
     const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
+    const tnc155_rom_view *font = tnc155_rom_get(TNC155_ROM_P1);
     unsigned active_height = tnc155_video_active_height(s_machine);
     unsigned line_height = gdc->lines_per_character != 0u ?
                            gdc->lines_per_character : 1u;
-    unsigned dst_y0;
-    unsigned y;
+    unsigned effective_pitch = gdc->pitch != 0u ? gdc->pitch : 1u;
+    unsigned native_y0;
+    unsigned base_y = 0u;
+    unsigned area;
 
-    if (active_height > TNC155_VIDEO_HEIGHT)
-        active_height = TNC155_VIDEO_HEIGHT;
-
-    /* Always clear the maximum TNC rectangle; 468/490-line mode transitions
-       then cannot leave stale scanlines in the framebuffer. */
-    for (y = 0u; y < TNC155_VIDEO_HEIGHT; ++y)
-        memset(dst + (size_t)(TNC_Y0_MAX + y) * HDMI_WIDTH + TNC_X0,
-               TNC_L8_OFF_NORMAL, TNC155_VIDEO_WIDTH);
+    memset(s_native_frame, TNC_L8_OFF_NORMAL, TNC_NATIVE_BYTES);
 
     if (!gdc->display_enabled)
-        return;
+        goto done;
+    if (font == NULL || font->bytes == NULL || font->size < 0x4000u)
+        return false;
+    if (active_height > TNC_NATIVE_HEIGHT)
+        active_height = TNC_NATIVE_HEIGHT;
 
-    dst_y0 = (HDMI_HEIGHT - active_height) / 2u;
-    for (y = 0u; y < active_height; ++y) {
-        tnc_l8_partition part;
-        unsigned local_y;
-        unsigned effective_pitch;
-        uint8_t *row;
-        unsigned word_column;
+    native_y0 = (TNC_NATIVE_HEIGHT - active_height) / 2u;
 
-        if (!locate_scanline(gdc, y, &part, &local_y))
+    for (area = 0u; area < 4u && base_y < active_height; ++area) {
+        tnc_l8_partition part = decode_partition(gdc, area);
+        unsigned length = part.length;
+
+        if (length == 0u && part.graphics)
+            length = 0x400u;
+        if (length == 0u)
             continue;
+        if (length > active_height - base_y)
+            length = active_height - base_y;
+        part.length = (uint16_t)length;
 
-        row = dst + (size_t)(dst_y0 + y) * HDMI_WIDTH + TNC_X0;
-        effective_pitch = gdc->pitch != 0u ? gdc->pitch : 1u;
-
-        if (!part.graphics) {
-            uint32_t line_base = part.start +
-                (local_y / line_height) * effective_pitch;
-
-            for (word_column = 0u; word_column < 32u; ++word_column) {
-                uint32_t word = (line_base + word_column) & 0x7fffu;
-                uint16_t cell = (uint16_t)(
-                    (uint16_t)gdc->scanout_character_video[word * 2u] << 8 |
-                    gdc->scanout_character_video[word * 2u + 1u]);
-                uint8_t ascii = (uint8_t)cell;
-                uint8_t mode_data = (uint8_t)(cell >> 8);
-                unsigned p1_mode = (mode_data >> 2) & 0x07u;
-                uint8_t glyph = tnc155_clp_font_row(
-                    p1_mode, ascii & 0x3fu, local_y % line_height);
-                bool inverse = (mode_data & 0x01u) != 0u;
-                unsigned colour_base = (mode_data & 0x02u) != 0u ? 2u : 0u;
-                unsigned bit;
-                uint8_t *cell_dst = row + word_column * 16u;
-
-                for (bit = 0u; bit < 8u; ++bit) {
-                    bool set = (glyph & (uint8_t)(0x80u >> bit)) != 0u;
-                    uint8_t colour;
-                    if (inverse)
-                        set = !set;
-                    colour = phosphor[colour_base | (set ? 1u : 0u)];
-                    cell_dst[bit * 2u] = colour;
-                    cell_dst[bit * 2u + 1u] = colour;
-                }
-            }
-        } else {
-            unsigned pitch = effective_pitch;
-            if (gdc->display_mode == TNC155_GDC_MODE_MIXED)
-                pitch >>= 1;
-            if (pitch == 0u)
-                pitch = 1u;
-
-            for (word_column = 0u; word_column < 32u; ++word_column) {
-                uint32_t word = (part.start + local_y * pitch + word_column) &
-                                0x7fffu;
-                uint16_t bits = (uint16_t)(
-                    (uint16_t)gdc->scanout_character_video[word * 2u] << 8 |
-                    gdc->scanout_character_video[word * 2u + 1u]);
-                unsigned bit;
-                uint8_t *word_dst = row + word_column * 16u;
-                for (bit = 0u; bit < 16u; ++bit)
-                    word_dst[bit] = (bits & (uint16_t)(1u << bit)) != 0u ?
-                                    TNC_L8_ON_NORMAL : TNC_L8_OFF_NORMAL;
-            }
-        }
+        if (part.graphics)
+            render_graphics_partition(gdc, &part, native_y0 + base_y,
+                                      effective_pitch);
+        else
+            render_text_partition(gdc, font, &part, native_y0 + base_y,
+                                  line_height, effective_pitch);
+        base_y += length;
     }
-}
 
-static void copy_tnc_l8(uint8_t *dst, const uint8_t *src)
-{
-    unsigned y;
-    for (y = 0u; y < TNC155_VIDEO_HEIGHT; ++y) {
-        size_t offset = (size_t)(TNC_Y0_MAX + y) * HDMI_WIDTH + TNC_X0;
-        memcpy(dst + offset, src + offset, TNC155_VIDEO_WIDTH);
-    }
+done:
+    /* AXI SRAM is in the default cacheable SRAM region. DMA2D cannot see
+       dirty M7 D-cache lines, so publish the complete native image once per
+       redraw. Address and byte count are both cache-line aligned. */
+    SCB_CleanDCache_by_Addr((uint32_t *)(void *)s_native_frame,
+                            (int32_t)TNC_NATIVE_BYTES);
+    __DSB();
+    return true;
 }
 
 static bool gdc_video_dirty(void)
@@ -544,6 +656,7 @@ static bool present_frame(bool redraw_tnc)
     uint32_t start_core_cycles;
     uint8_t back_fb;
     uint8_t *dst;
+    bool dma_ok;
 
     if (s_swap_pending != 0u)
         return false;
@@ -553,11 +666,19 @@ static bool present_frame(bool redraw_tnc)
     dst = (uint8_t *)(uintptr_t)framebuffer_address(back_fb);
 
     if (redraw_tnc) {
-        render_tnc_l8(dst);
+        if (!render_tnc_native()) {
+            g_tnc155_faulted = 1u;
+            return false;
+        }
+        dma_ok = dma2d_copy_tnc(TNC_NATIVE_ADDRESS,
+                                framebuffer_tnc_address(back_fb), false);
     } else {
-        const uint8_t *front =
-            (const uint8_t *)(uintptr_t)framebuffer_address(s_front_fb);
-        copy_tnc_l8(dst, front);
+        dma_ok = dma2d_copy_tnc(framebuffer_tnc_address(s_front_fb),
+                                framebuffer_tnc_address(back_fb), true);
+    }
+    if (!dma_ok) {
+        g_tnc155_faulted = 1u;
+        return false;
     }
 
     draw_debug_overlay(dst);
@@ -594,6 +715,10 @@ bool TNC155_Firmware_Init(void)
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CYCCNT = 0u;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+    init_raster_luts();
+    if (!configure_dma2d_raw_l8())
+        return false;
 
     load_rgb332_clut();
     clear_framebuffer(FRAMEBUFFER0_ADDRESS);
