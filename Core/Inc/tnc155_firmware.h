@@ -6,6 +6,7 @@
 
 bool TNC155_Firmware_Init(void);
 void TNC155_Firmware_Task(void);
+void TNC155_Firmware_SysTickISR(void);
 void TNC155_Firmware_LTDCReloadComplete(void);
 
 extern volatile uint32_t g_tnc155_last_slice_core_cycles;
