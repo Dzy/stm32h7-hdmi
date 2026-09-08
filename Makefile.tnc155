@@ -40,6 +40,7 @@ $(TNC155_ROM_DIR)/2346166A_nr6.rom
 C_SOURCES = \
 Core/Src/tnc155_main.c \
 Core/Src/tnc155_firmware.c \
+Core/Src/tnc155_nvram_flash.c \
 Core/Src/tnc155_usb_cdc.c \
 Core/Src/gpio.c \
 Core/Src/ltdc.c \
@@ -158,7 +159,12 @@ CFLAGS += -g -gdwarf-2
 endif
 CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 
-LDSCRIPT = STM32H743IITx_FLASH.ld
+# The H743 has 2 MiB internal flash.  TNC155 reserves the final two 128 KiB
+# sectors (Bank 2 sectors 6 and 7) for power-loss-safe A/B User-RAM storage.
+# Generate a TNC-only linker script that exposes only the first 1792 KiB to
+# the linker, so firmware growth can never overlap the persistent slots.
+LDSCRIPT_BASE = STM32H743IITx_FLASH.ld
+LDSCRIPT = $(BUILD_DIR)/STM32H743IITx_TNC155_FLASH.ld
 INCLUDES_LIBS_H7 = Drivers/CMSIS/Lib/GCC/libarm_cortexM7lfdp_math.a
 LIBS = -lc -lm -lnosys
 LDFLAGS = $(MCU) $(LTO_FLAGS) -specs=nano.specs -T$(LDSCRIPT) $(LIBS) \
@@ -186,6 +192,11 @@ $(TNC155_NVRAM_HEADER): $(TNC155_DIR)/tools/embed_nvram.py $(TNC155_NVRAM_FILE)
 
 $(BUILD_DIR)/Core/Src/tnc155_firmware.o: $(TNC155_NVRAM_HEADER)
 
+$(LDSCRIPT): $(LDSCRIPT_BASE) | $(BUILD_DIR)
+	sed 's/LENGTH = 2048K/LENGTH = 1792K/' $< > $@
+	@grep -q 'LENGTH = 1792K' $@ || \
+	  (echo "Failed to reserve final 256 KiB flash for TNC155 NVRAM" >&2; exit 1)
+
 $(BUILD_DIR)/%.o: %.c Makefile.tnc155
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(patsubst %.o,%.lst,$@) $< -o $@
@@ -198,7 +209,7 @@ $(BUILD_DIR)/tnc155/%.o: $(TNC155_DIR)/%.c Makefile.tnc155 $(TNC155_ROM_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(patsubst %.o,%.lst,$@) $< -o $@
 
-$(BUILD_DIR)/$(TARGET).elf: $(ALL_OBJECTS) Makefile.tnc155
+$(BUILD_DIR)/$(TARGET).elf: $(ALL_OBJECTS) Makefile.tnc155 $(LDSCRIPT)
 	$(CC) $(ALL_OBJECTS) $(LDFLAGS) -o $@
 	$(SZ) $@
 
