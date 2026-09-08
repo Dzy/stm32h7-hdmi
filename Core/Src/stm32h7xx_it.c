@@ -24,6 +24,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #ifdef TNC155_FIRMWARE
+#include "tnc155_firmware.h"
 #include "tnc155_usb_cdc.h"
 #endif
 /* USER CODE END Includes */
@@ -194,7 +195,9 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
-
+#ifdef TNC155_FIRMWARE
+  TNC155_Firmware_SysTickISR();
+#endif
   /* USER CODE END SysTick_IRQn 1 */
 }
 
