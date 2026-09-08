@@ -10,6 +10,7 @@ TARGET = STM32H7_TNC155
 BUILD_DIR = build_tnc155
 DEBUG ?= 1
 OPT ?= -O3
+LTO_FLAGS ?= -flto -fuse-linker-plugin
 
 TNC155_DIR ?= ../tnc155-emulator
 TINYUSB_VERSION = 0.21.0
@@ -150,7 +151,7 @@ C_INCLUDES = \
 -I$(TNC155_GENERATED_DIR)
 
 ASFLAGS = $(MCU) $(OPT) -Wall -fdata-sections -ffunction-sections $(FPU_FLAGS)
-CFLAGS = $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) -std=gnu11 -Wall \
+CFLAGS = $(MCU) $(C_DEFS) $(C_INCLUDES) $(OPT) $(LTO_FLAGS) -std=gnu11 -Wall \
 -fdata-sections -ffunction-sections $(FPU_FLAGS)
 ifeq ($(DEBUG),1)
 CFLAGS += -g -gdwarf-2
@@ -160,7 +161,7 @@ CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 LDSCRIPT = STM32H743IITx_FLASH.ld
 INCLUDES_LIBS_H7 = Drivers/CMSIS/Lib/GCC/libarm_cortexM7lfdp_math.a
 LIBS = -lc -lm -lnosys
-LDFLAGS = $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBS) \
+LDFLAGS = $(MCU) $(LTO_FLAGS) -specs=nano.specs -T$(LDSCRIPT) $(LIBS) \
 -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections $(INCLUDES_LIBS_H7)
 
 OBJECTS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
