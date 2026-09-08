@@ -25,6 +25,8 @@ endif
 TNC155_GENERATED_DIR = $(BUILD_DIR)/generated
 TNC155_ROM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_rom_images.h
 TNC155_NVRAM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_default_user_ram.h
+TNC155_NVRAM_FACTORY_C = $(TNC155_GENERATED_DIR)/tnc155_nvram_factory.c
+TNC155_NVRAM_FACTORY_OBJ = $(TNC155_GENERATED_DIR)/tnc155_nvram_factory.o
 TNC155_ROM_DIR = $(TNC155_DIR)/roms
 TNC155_ROM5_FILE = $(TNC155_DIR)/rom-overrides/new_2340005E_nr5.bin
 TNC155_NVRAM_FILE = $(TNC155_DIR)/tnc155-user-ram.bin
@@ -40,6 +42,7 @@ $(TNC155_ROM_DIR)/2346166A_nr6.rom
 C_SOURCES = \
 Core/Src/tnc155_main.c \
 Core/Src/tnc155_firmware.c \
+Core/Src/tnc155_firmware_persist.c \
 Core/Src/tnc155_nvram_flash.c \
 Core/Src/tnc155_usb_cdc.c \
 Core/Src/gpio.c \
@@ -94,8 +97,6 @@ $(TINYUSB_DIR)/src/portable/synopsys/dwc2/dwc2_common.c
 
 ASM_SOURCES = startup_stm32h743xx.s
 
-# TNC core sources are compiled with a separate rule so an external checkout
-# never produces object paths outside BUILD_DIR.
 TNC155_REL_C_SOURCES = \
 src/roms.c \
 src/cpu/tms9995.c \
@@ -159,21 +160,25 @@ CFLAGS += -g -gdwarf-2
 endif
 CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 
-# The H743 has 2 MiB internal flash.  TNC155 reserves the final two 128 KiB
-# sectors (Bank 2 sectors 6 and 7) for power-loss-safe A/B User-RAM storage.
-# Generate a TNC-only linker script that exposes only the first 1792 KiB to
-# the linker, so firmware growth can never overlap the persistent slots.
+# Application code is limited to the first 1792 KiB.  Bank 2 sectors 6 and 7
+# (0x081C0000 and 0x081E0000) are dedicated to persistent TNC User RAM.
 LDSCRIPT_BASE = STM32H743IITx_FLASH.ld
 LDSCRIPT = $(BUILD_DIR)/STM32H743IITx_TNC155_FLASH.ld
 INCLUDES_LIBS_H7 = Drivers/CMSIS/Lib/GCC/libarm_cortexM7lfdp_math.a
 LIBS = -lc -lm -lnosys
+NVRAM_LINK_FLAGS = \
+-Wl,--section-start=.tnc155_nvram_factory_a=0x081C0000 \
+-Wl,--section-start=.tnc155_nvram_factory_b=0x081E0000 \
+-Wl,--undefined=g_tnc155_nvram_factory_slot_a \
+-Wl,--undefined=g_tnc155_nvram_factory_slot_b_marker
 LDFLAGS = $(MCU) $(LTO_FLAGS) -specs=nano.specs -T$(LDSCRIPT) $(LIBS) \
+$(NVRAM_LINK_FLAGS) \
 -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections $(INCLUDES_LIBS_H7)
 
 OBJECTS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 OBJECTS += $(patsubst %.s,$(BUILD_DIR)/%.o,$(ASM_SOURCES))
 TNC155_OBJECTS = $(patsubst %.c,$(BUILD_DIR)/tnc155/%.o,$(TNC155_REL_C_SOURCES))
-ALL_OBJECTS = $(OBJECTS) $(TNC155_OBJECTS)
+ALL_OBJECTS = $(OBJECTS) $(TNC155_OBJECTS) $(TNC155_NVRAM_FACTORY_OBJ)
 
 all: check-tnc155 $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_DIR)/$(TARGET).bin
 
@@ -186,11 +191,32 @@ $(TNC155_ROM_HEADER): $(TNC155_DIR)/tools/embed_roms.py $(TNC155_ROM_FILES)
 	@mkdir -p $(dir $@)
 	python3 "$(TNC155_DIR)/tools/embed_roms.py" "$(TNC155_ROM_DIR)" "$@" --p5 "$(TNC155_ROM5_FILE)"
 
+# Retained for the current core-init implementation; persistence immediately
+# replaces this temporary RAM copy from the flash slot before emulation starts.
 $(TNC155_NVRAM_HEADER): $(TNC155_DIR)/tools/embed_nvram.py $(TNC155_NVRAM_FILE)
 	@mkdir -p $(dir $@)
 	python3 "$(TNC155_DIR)/tools/embed_nvram.py" "$(TNC155_NVRAM_FILE)" "$@"
 
-$(BUILD_DIR)/Core/Src/tnc155_firmware.o: $(TNC155_NVRAM_HEADER)
+# This is the actual nonvolatile boot image.  Slot A contains header+CRC+72 KiB
+# User RAM; slot B contains an invalid marker so reflashing firmware invalidates
+# an older runtime B slot and selects the newly compiled User RAM.
+$(TNC155_NVRAM_FACTORY_C): tools/embed_tnc155_nvram_slot.py $(TNC155_NVRAM_FILE)
+	@mkdir -p $(dir $@)
+	python3 tools/embed_tnc155_nvram_slot.py "$(TNC155_NVRAM_FILE)" "$@"
+
+$(TNC155_NVRAM_FACTORY_OBJ): $(TNC155_NVRAM_FACTORY_C) Makefile.tnc155
+	$(CC) -c $(CFLAGS) $< -o $@
+
+# Compile the existing firmware implementation as an inner core.  Its clock is
+# persistence-aware, so sector erase/program time never inflates emulation lag.
+$(BUILD_DIR)/Core/Src/tnc155_firmware.o: Core/Src/tnc155_firmware.c Makefile.tnc155 $(TNC155_NVRAM_HEADER)
+	@mkdir -p $(dir $@)
+	$(CC) -c $(CFLAGS) \
+	  -DTNC155_Firmware_Init=TNC155_Firmware_Core_Init \
+	  -DTNC155_Firmware_Task=TNC155_Firmware_Core_Task \
+	  -DHAL_GetTick=TNC155_PacedTick \
+	  -include Core/Inc/tnc155_paced_tick.h \
+	  -Wa,-a,-ad,-alms=$(patsubst %.o,%.lst,$@) $< -o $@
 
 $(LDSCRIPT): $(LDSCRIPT_BASE) | $(BUILD_DIR)
 	sed 's/LENGTH = 2048K/LENGTH = 1792K/' $< > $@
