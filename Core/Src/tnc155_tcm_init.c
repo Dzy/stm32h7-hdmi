@@ -1,5 +1,6 @@
 #include "tnc155_firmware.h"
 
+#include "ltdc.h"
 #include "main.h"
 
 #include <stdbool.h>
@@ -54,8 +55,42 @@ static void TNC155_TCM_Init(void)
     __ISB();
 }
 
+static void TNC155_ApplyAmberCLUT(void)
+{
+    uint32_t clut[256];
+    uint32_t i;
+
+    /* Preserve ordinary RGB332 for the debug overlay and any diagnostic
+       colours.  Only the four indices used by the emulated TNC phosphor are
+       replaced with amber monitor levels. */
+    for (i = 0u; i < 256u; ++i) {
+        uint32_t r3 = (i >> 5) & 7u;
+        uint32_t g3 = (i >> 2) & 7u;
+        uint32_t b2 = i & 3u;
+        uint32_t r = (r3 * 255u + 3u) / 7u;
+        uint32_t g = (g3 * 255u + 3u) / 7u;
+        uint32_t b = (b2 * 255u + 1u) / 3u;
+        clut[i] = (r << 16) | (g << 8) | b;
+    }
+
+    /* Indices are defined by the direct L8 TNC renderer. */
+    clut[0x00u] = 0x000000u; /* black */
+    clut[0x04u] = 0x2a1800u; /* dark amber pedestal */
+    clut[0x71u] = 0x805000u; /* dim amber */
+    clut[0xdfu] = 0xffb000u; /* bright amber */
+    clut[0xffu] = 0xffffffu; /* debug text remains white */
+
+    if (HAL_LTDC_ConfigCLUT(&hltdc, clut, 256u, 0u) != HAL_OK ||
+        HAL_LTDC_EnableCLUT(&hltdc, 0u) != HAL_OK)
+        Error_Handler();
+    HAL_LTDC_DisableDither(&hltdc);
+}
+
 bool TNC155_Firmware_Init(void)
 {
     TNC155_TCM_Init();
-    return TNC155_Firmware_Core_Init();
+    if (!TNC155_Firmware_Core_Init())
+        return false;
+    TNC155_ApplyAmberCLUT();
+    return true;
 }
