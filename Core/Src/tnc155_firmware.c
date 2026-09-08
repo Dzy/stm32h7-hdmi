@@ -169,14 +169,22 @@ static void render_frame(void)
 
     __DSB();
     if (HAL_LTDC_SetAddress_NoReload(&hltdc, framebuffer_address(back_fb), 0u)
-            != HAL_OK ||
-        HAL_LTDC_Reload(&hltdc, LTDC_RELOAD_VERTICAL_BLANKING) != HAL_OK) {
+            != HAL_OK) {
         g_tnc155_faulted = 1u;
         return;
     }
 
+    /* Arm software state before requesting the VBlank reload.  The reload
+       interrupt may fire immediately after the request; setting these first
+       prevents the callback from observing an unarmed swap and losing it. */
     s_pending_fb = back_fb;
     s_swap_pending = 1u;
+    if (HAL_LTDC_Reload(&hltdc, LTDC_RELOAD_VERTICAL_BLANKING) != HAL_OK) {
+        s_swap_pending = 0u;
+        g_tnc155_faulted = 1u;
+        return;
+    }
+
     g_tnc155_last_frame_core_cycles = DWT->CYCCNT - start_core_cycles;
 }
 
