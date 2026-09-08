@@ -14,7 +14,7 @@
 #define TNC155_NVRAM_MAGIC          0x544E4331u /* "TNC1" */
 #define TNC155_NVRAM_VERSION        1u
 #define TNC155_FLASHWORD_SIZE       32u
-#define TNC155_NVRAM_SAVE_QUIET_MS  5000u
+#define TNC155_NVRAM_SAVE_DELAY_MS  5000u
 #define TNC155_NVRAM_RETRY_MS       10000u
 
 typedef struct tnc155_nvram_header {
@@ -31,6 +31,7 @@ _Static_assert(sizeof(tnc155_nvram_header) == TNC155_FLASHWORD_SIZE,
 
 static uint32_t s_last_error;
 static uint32_t s_sequence;
+static uint32_t s_persisted_crc;
 static uint32_t s_save_due_ms;
 static uint32_t s_save_count;
 static uint32_t s_save_error_count;
@@ -253,13 +254,8 @@ bool TNC155_NVRAM_Init(tnc155_mainboard *board,
     s_save_error_count = 0u;
     s_save_pending = false;
 
-    /* Normal boot path: User RAM is always sourced from internal flash. */
     if (!TNC155_NVRAM_Flash_Load(board->user_ram, sizeof(board->user_ram),
                                  &s_sequence)) {
-        /* First installation (or both slots invalid): provision a valid flash
-           slot from the compiled factory image, then read it back exactly as
-           every later boot does.  The emulator never runs directly from the
-           compiled fallback image. */
         uint32_t seed_sequence = 0u;
         if (!TNC155_NVRAM_Flash_Save(fallback, fallback_size,
                                      &seed_sequence))
@@ -271,6 +267,7 @@ bool TNC155_NVRAM_Init(tnc155_mainboard *board,
     }
 
     s_loaded_from_flash = true;
+    s_persisted_crc = crc32_bytes(board->user_ram, sizeof(board->user_ram));
     board->user_ram_loaded = true;
     board->user_ram_dirty = false;
     return true;
@@ -285,9 +282,13 @@ void TNC155_NVRAM_Task(tnc155_mainboard *board)
 
     now = HAL_GetTick();
     if (board->user_ram_dirty) {
+        uint32_t current_crc;
         board->user_ram_dirty = false;
-        s_save_pending = true;
-        s_save_due_ms = now + TNC155_NVRAM_SAVE_QUIET_MS;
+        current_crc = crc32_bytes(board->user_ram, sizeof(board->user_ram));
+        if (current_crc != s_persisted_crc && !s_save_pending) {
+            s_save_pending = true;
+            s_save_due_ms = now + TNC155_NVRAM_SAVE_DELAY_MS;
+        }
     }
 
     if (!s_save_pending || (int32_t)(now - s_save_due_ms) < 0)
@@ -295,6 +296,8 @@ void TNC155_NVRAM_Task(tnc155_mainboard *board)
 
     if (TNC155_NVRAM_Flash_Save(board->user_ram, sizeof(board->user_ram),
                                 &s_sequence)) {
+        s_persisted_crc = crc32_bytes(board->user_ram,
+                                      sizeof(board->user_ram));
         ++s_save_count;
         s_save_pending = false;
     } else {
