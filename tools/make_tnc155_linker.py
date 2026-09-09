@@ -2,6 +2,20 @@
 import pathlib
 import sys
 
+JUMPTABLE = r'''
+  /* 64K x 32-bit Musashi-style TMS9995 opcode jump table.  It must remain
+     execute-near in internal FLASH; do not copy this 256 KiB table to DTCM. */
+  .tms9995_jump_table :
+  {
+    . = ALIGN(32);
+    __tnc155_jump_table_start__ = .;
+    KEEP(*(.tms9995_jump_table))
+    . = ALIGN(32);
+    __tnc155_jump_table_end__ = .;
+  } >FLASH
+
+'''
+
 ITCM = r'''
   /* TNC155 TMS9995 hot code: copied from flash to 64 KiB ITCM at boot. */
   .itcm_tms9995 :
@@ -53,7 +67,7 @@ def main() -> int:
     if code_marker not in text or ro_marker not in text:
         raise SystemExit("unexpected STM32H743 linker script layout")
 
-    text = text.replace(code_marker, ITCM + code_marker, 1)
+    text = text.replace(code_marker, JUMPTABLE + ITCM + code_marker, 1)
     text = text.replace(ro_marker, DTCM + ro_marker, 1)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(text, encoding="utf-8")
