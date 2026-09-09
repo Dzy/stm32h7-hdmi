@@ -143,6 +143,24 @@ void HAL_LTDC_ReloadEventCallback(LTDC_HandleTypeDef *ltdc)
         TNC155_Firmware_LTDCReloadComplete();
 }
 
+void HAL_LTDC_ErrorCallback(LTDC_HandleTypeDef *ltdc)
+{
+    uint32_t errors;
+
+    if (ltdc == NULL || ltdc->Instance != LTDC)
+        return;
+
+    errors = ltdc->ErrorCode;
+    if ((errors & HAL_LTDC_ERROR_FU) != 0u)
+        ++g_tnc155_ltdc_fifo_underruns;
+    if ((errors & HAL_LTDC_ERROR_TE) != 0u)
+        ++g_tnc155_ltdc_transfer_errors;
+
+    ltdc->ErrorCode &= ~(HAL_LTDC_ERROR_FU | HAL_LTDC_ERROR_TE);
+    ltdc->State = HAL_LTDC_STATE_READY;
+    __HAL_LTDC_ENABLE_IT(ltdc, LTDC_IT_FU | LTDC_IT_TE);
+}
+
 void SystemClock_Config(void)
 {
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};

@@ -12,6 +12,9 @@ void TNC155_Firmware_LTDCReloadComplete(void);
 extern volatile uint32_t g_tnc155_last_slice_core_cycles;
 extern volatile uint32_t g_tnc155_max_slice_core_cycles;
 extern volatile uint32_t g_tnc155_last_frame_core_cycles;
+extern volatile uint32_t g_tnc155_ltdc_fifo_underruns;
+extern volatile uint32_t g_tnc155_ltdc_transfer_errors;
+extern volatile uint32_t g_tnc155_ltdc_reload_count;
 extern volatile uint8_t g_tnc155_faulted;
 
 #endif /* TNC155_FIRMWARE_H */

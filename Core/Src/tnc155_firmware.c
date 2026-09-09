@@ -50,7 +50,7 @@
 #define DEBUG_X       12U
 #define DEBUG_Y       12U
 #define DEBUG_W       620U
-#define DEBUG_H       164U
+#define DEBUG_H       196U
 #define DEBUG_SCALE   2U
 #define DEBUG_FG      0xffU
 #define DEBUG_BG      0x00U
@@ -111,6 +111,9 @@ static volatile uint8_t s_swap_pending;
 volatile uint32_t g_tnc155_last_slice_core_cycles;
 volatile uint32_t g_tnc155_max_slice_core_cycles;
 volatile uint32_t g_tnc155_last_frame_core_cycles;
+volatile uint32_t g_tnc155_ltdc_fifo_underruns;
+volatile uint32_t g_tnc155_ltdc_transfer_errors;
+volatile uint32_t g_tnc155_ltdc_reload_count;
 volatile uint8_t g_tnc155_faulted;
 
 static const uint8_t debug_digits[10][7] = {
@@ -337,6 +340,20 @@ static void draw_debug_overlay(uint8_t *dst)
     p = debug_append_hex32(p, g_tnc155_last_frame_core_cycles);
     *p = '\0';
     debug_draw_line(dst, 8u, line);
+
+    p = debug_append_text(line, "LTDC FU=");
+    p = debug_append_hex32(p, g_tnc155_ltdc_fifo_underruns);
+    p = debug_append_text(p, " TE=");
+    p = debug_append_hex32(p, g_tnc155_ltdc_transfer_errors);
+    *p = '\0';
+    debug_draw_line(dst, 9u, line);
+
+    p = debug_append_text(line, "RLD=");
+    p = debug_append_hex32(p, g_tnc155_ltdc_reload_count);
+    p = debug_append_text(p, " CFB=");
+    p = debug_append_hex32(p, LTDC_Layer1->CFBAR);
+    *p = '\0';
+    debug_draw_line(dst, 10u, line);
 }
 
 static void load_rgb332_clut(void)
@@ -632,6 +649,9 @@ bool TNC155_Firmware_Init(void)
     g_tnc155_last_slice_core_cycles = 0u;
     g_tnc155_max_slice_core_cycles = 0u;
     g_tnc155_last_frame_core_cycles = 0u;
+    g_tnc155_ltdc_fifo_underruns = 0u;
+    g_tnc155_ltdc_transfer_errors = 0u;
+    g_tnc155_ltdc_reload_count = 0u;
 
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CYCCNT = 0u;
@@ -732,6 +752,7 @@ void TNC155_Firmware_SysTickISR(void)
 
 void TNC155_Firmware_LTDCReloadComplete(void)
 {
+    ++g_tnc155_ltdc_reload_count;
     if (s_swap_pending != 0u) {
         s_front_fb = s_pending_fb;
         s_swap_pending = 0u;
