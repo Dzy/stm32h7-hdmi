@@ -41,7 +41,6 @@ Core/Src/tnc155_main.c \
 Core/Src/tnc155_firmware.c \
 Core/Src/tnc155_tcm_init.c \
 Core/Src/tnc155_usb_cdc.c \
-Core/Src/tnc155_upd7220_l8.c \
 Core/Src/gpio.c \
 Core/Src/ltdc.c \
 Core/Src/rtc.c \
@@ -105,7 +104,9 @@ src/serial/tms9902.c \
 src/main/main_mapper.c \
 src/main/mainboard.c \
 src/clp/clp_board.c \
+src/clp/upd7220.c \
 src/machine/machine.c \
+src/clp/video.c \
 src/frontend/serial_keyboard_protocol.c
 
 PREFIX = arm-none-eabi-
