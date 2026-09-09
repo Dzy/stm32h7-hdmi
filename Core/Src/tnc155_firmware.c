@@ -379,11 +379,14 @@ static void clear_framebuffer(uint32_t address)
 
 static bool init_raster_luts(void)
 {
+    const tnc155_rom_view *font = tnc155_rom_get(TNC155_ROM_P1);
     unsigned bank;
     unsigned glyph;
     unsigned row;
     unsigned pattern;
 
+    if (font == NULL || font->bytes == NULL || font->size < 0x4000u)
+        return false;
 
     for (bank = 0u; bank < TNC_FONT_ATLAS_BANKS; ++bank) {
         unsigned p1_mode = bank == 0u ? 0u : bank + 2u;
@@ -745,7 +748,6 @@ static void native_l8_word_written(void *opaque,
 static bool render_tnc_native(void)
 {
     const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
-    const tnc155_rom_view *font = tnc155_rom_get(TNC155_ROM_P1);
     unsigned active_height = tnc155_video_active_height(s_machine);
     unsigned line_height = gdc->lines_per_character != 0u ?
                            gdc->lines_per_character : 1u;
