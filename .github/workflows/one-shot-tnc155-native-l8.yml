@@ -1,0 +1,114 @@
+name: one-shot TNC155 native L8 renderer patch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-shot-tnc155-native-l8.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout board branch
+        uses: actions/checkout@v4
+        with:
+          ref: tnc155-tinyusb-cdc
+          fetch-depth: 0
+      - name: Checkout emulator STM32 branch
+        uses: actions/checkout@v4
+        with:
+          repository: Dzy/tnc155-emulator
+          ref: stm32-portable-serial
+          path: tnc155-emulator
+      - name: Patch native L8 renderer and atlas
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('Core/Src/tnc155_firmware.c')
+          s = p.read_text()
+
+          old = '''#define TNC_NATIVE_WIDTH        TNC155_VIDEO_WIDTH\n#define TNC_NATIVE_HEIGHT       TNC155_VIDEO_HEIGHT\n#define TNC_NATIVE_BYTES        ((size_t)TNC_NATIVE_WIDTH * TNC_NATIVE_HEIGHT)\n#define TNC_NATIVE_ADDRESS      AXI_SRAM_BASE_ADDRESS\n#define TNC_DMA2D_WIDTH         (TNC_NATIVE_WIDTH / 2U)'''
+          new = '''#define TNC_NATIVE_WIDTH        TNC155_VIDEO_WIDTH\n#define TNC_NATIVE_HEIGHT       TNC155_VIDEO_HEIGHT\n#define TNC_NATIVE_BYTES        ((size_t)TNC_NATIVE_WIDTH * TNC_NATIVE_HEIGHT)\n#define TNC_NATIVE_ADDRESS      AXI_SRAM_BASE_ADDRESS\n#define TNC_FONT_ATLAS_BANKS    6U\n#define TNC_FONT_ATLAS_GLYPHS   64U\n#define TNC_FONT_ATLAS_ROWS     32U\n#define TNC_FONT_ATLAS_ROW_BYTES 16U\n#define TNC_FONT_ATLAS_BYTES    ((size_t)TNC_FONT_ATLAS_BANKS * \\\n                                 TNC_FONT_ATLAS_GLYPHS * \\\n                                 TNC_FONT_ATLAS_ROWS * \\\n                                 TNC_FONT_ATLAS_ROW_BYTES)\n#define TNC_FONT_ATLAS_ADDRESS  (TNC_NATIVE_ADDRESS + \\\n                                 ((TNC_NATIVE_BYTES + 31U) & ~(size_t)31U))\n#define TNC_DMA2D_WIDTH         (TNC_NATIVE_WIDTH / 2U)'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''_Static_assert(TNC_NATIVE_BYTES <= (512U * 1024U),\n               "TNC155 native staging image does not fit AXI SRAM");\n_Static_assert((offsetof(tnc155_upd7220, scanout_character_video) & 3u) == 0u,'''
+          new = '''_Static_assert(TNC_NATIVE_BYTES <= (512U * 1024U),\n               "TNC155 native staging image does not fit AXI SRAM");\n_Static_assert((TNC_FONT_ATLAS_ADDRESS + TNC_FONT_ATLAS_BYTES) <=\n               (AXI_SRAM_BASE_ADDRESS + AXI_SRAM_SIZE_BYTES),\n               "TNC155 native L8 image plus font atlas do not fit AXI SRAM");\n_Static_assert((offsetof(tnc155_upd7220, scanout_character_video) & 3u) == 0u,'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''static uint8_t *const s_native_frame =\n    (uint8_t *)(uintptr_t)TNC_NATIVE_ADDRESS;\nstatic tnc155_serial_keyboard s_keyboard;\n\n/* DTCM-resident expansion tables. A P1 row byte becomes sixteen final L8\n   bytes (each P1 bit is two output pixels). All eight P1 modes use the same\n   table, so the small-font vertical variants and large-font data remain\n   entirely ROM-defined. */\nstatic uint32_t s_text_row_lut[4][256][4];\nstatic uint32_t s_graphics_byte_lut[256][2];'''
+          new = '''static uint8_t *const s_native_frame =\n    (uint8_t *)(uintptr_t)TNC_NATIVE_ADDRESS;\nstatic uint8_t *const s_font_atlas =\n    (uint8_t *)(uintptr_t)TNC_FONT_ATLAS_ADDRESS;\nstatic tnc155_serial_keyboard s_keyboard;\n\n/* The P1 font is expanded once at boot into a byte-per-pixel L8 mask atlas\n   in AXI SRAM.  Modes 0..2 share the canonical mode-0 glyph bank and apply\n   only their measured vertical offsets when blitted; modes 3..7 each have\n   one bank.  Per-cell inverse/bright colours are then four 32-bit mask ops\n   per row instead of ROM lookup + bit expansion on every redraw. */\nstatic uint32_t s_graphics_byte_lut[256][2];'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''static uint32_t s_rendered_scanout_commits;\nstatic volatile uint32_t s_pending_hw_ms;'''
+          new = '''static uint32_t s_rendered_scanout_commits;\nstatic uint8_t s_native_full_redraw;\nstatic volatile uint32_t s_pending_hw_ms;'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          pattern = re.compile(r'static void init_raster_luts\(void\)\n\{.*?\n\}\n\nstatic bool configure_dma2d_raw_l8', re.S)
+          replacement = '''static bool init_raster_luts(void)\n{\n    const tnc155_rom_view *font = tnc155_rom_get(TNC155_ROM_P1);\n    unsigned bank;\n    unsigned glyph;\n    unsigned row;\n    unsigned pattern;\n\n    if (font == NULL || font->bytes == NULL || font->size < 0x4000u)\n        return false;\n\n    for (bank = 0u; bank < TNC_FONT_ATLAS_BANKS; ++bank) {\n        unsigned p1_mode = bank == 0u ? 0u : bank + 2u;\n        for (glyph = 0u; glyph < TNC_FONT_ATLAS_GLYPHS; ++glyph) {\n            for (row = 0u; row < TNC_FONT_ATLAS_ROWS; ++row) {\n                uint8_t bits = font->bytes[\n                    ((size_t)p1_mode * 64u + glyph) * 32u + row];\n                uint8_t *dst = s_font_atlas +\n                    (((size_t)bank * TNC_FONT_ATLAS_GLYPHS + glyph) *\n                     TNC_FONT_ATLAS_ROWS + row) * TNC_FONT_ATLAS_ROW_BYTES;\n                unsigned bit;\n\n                for (bit = 0u; bit < 8u; ++bit) {\n                    uint8_t mask = (bits & (0x80u >> bit)) != 0u ?\n                                   0xffu : 0x00u;\n                    dst[bit * 2u] = mask;\n                    dst[bit * 2u + 1u] = mask;\n                }\n            }\n        }\n    }\n\n    for (pattern = 0u; pattern < 256u; ++pattern) {\n        uint8_t *expanded = (uint8_t *)&s_graphics_byte_lut[pattern][0];\n        unsigned bit;\n        for (bit = 0u; bit < 8u; ++bit)\n            expanded[bit] = (pattern & (1u << bit)) != 0u ?\n                            TNC_L8_ON_NORMAL : TNC_L8_OFF_NORMAL;\n    }\n    return true;\n}\n\nstatic bool configure_dma2d_raw_l8'''
+          s, n = pattern.subn(replacement, s, count=1)
+          assert n == 1
+
+          pattern = re.compile(r'static void copy_text_row\(.*?\n\}\n\nstatic void render_graphics_word', re.S)
+          replacement = '''static unsigned p1_atlas_bank(unsigned p1_mode)\n{\n    return p1_mode <= 2u ? 0u : p1_mode - 2u;\n}\n\nstatic void blit_atlas_row(unsigned attr, const uint32_t *mask,\n                           uint32_t *dst)\n{\n    uint32_t off;\n    uint32_t mix;\n    unsigned i;\n\n    switch (attr & 3u) {\n    case 0u:\n        off = 0x00000000u;\n        mix = 0xdfdfdfdfu;\n        break;\n    case 1u:\n        off = 0xdfdfdfdfu;\n        mix = 0xdfdfdfdfu;\n        break;\n    case 2u:\n        off = 0x04040404u;\n        mix = 0x75757575u;\n        break;\n    default:\n        off = 0x71717171u;\n        mix = 0x75757575u;\n        break;\n    }\n\n    for (i = 0u; i < 4u; ++i)\n        dst[i] = off ^ (mask[i] & mix);\n}\n\nstatic uint16_t load_backing_word16(const tnc155_upd7220 *gdc, uint32_t word)\n{\n    uint32_t address = (word & 0x7fffu) * 2u;\n    return (uint16_t)((uint16_t)gdc->character_video_dram[address] << 8 |\n                      gdc->character_video_dram[address + 1u]);\n}\n\nstatic uint32_t load_backing_pair32(const tnc155_upd7220 *gdc,\n                                    uint32_t even_word)\n{\n    uint32_t raw;\n    uint32_t address = (even_word & 0x7fffu) * 2u;\n    memcpy(&raw, &gdc->character_video_dram[address], sizeof(raw));\n    return __REV16(raw);\n}\n\nstatic void render_text_cell(uint16_t cell, unsigned dst_base_y,\n                             unsigned cell_y, unsigned cell_height,\n                             unsigned word_column)\n{\n    static const uint32_t zero_row[4] = {0u, 0u, 0u, 0u};\n    uint8_t ascii = (uint8_t)cell;\n    uint8_t mode_data = (uint8_t)(cell >> 8);\n    unsigned p1_mode = (mode_data >> 2) & 0x07u;\n    unsigned character = ascii & 0x3fu;\n    unsigned attr = ((mode_data & 0x02u) != 0u ? 2u : 0u) |\n                    ((mode_data & 0x01u) != 0u ? 1u : 0u);\n    unsigned bank = p1_atlas_bank(p1_mode);\n    int y_offset = p1_mode <= 2u ?\n                   p1_small_font_y_offset(p1_mode, character) : 0;\n    unsigned row_in_cell;\n\n    for (row_in_cell = 0u; row_in_cell < cell_height; ++row_in_cell) {\n        int source_row = (int)row_in_cell - y_offset;\n        const uint32_t *src = zero_row;\n        uint32_t *dst = (uint32_t *)(void *)(s_native_frame +\n            (size_t)(dst_base_y + cell_y + row_in_cell) *\n            TNC_NATIVE_WIDTH + word_column * 16u);\n\n        if (source_row >= 0 && source_row < (int)TNC_FONT_ATLAS_ROWS) {\n            src = (const uint32_t *)(const void *)(s_font_atlas +\n                (((size_t)bank * TNC_FONT_ATLAS_GLYPHS + character) *\n                 TNC_FONT_ATLAS_ROWS + (unsigned)source_row) *\n                TNC_FONT_ATLAS_ROW_BYTES);\n        }\n        blit_atlas_row(attr, src, dst);\n    }\n}\n\nstatic void render_text_partition(const tnc155_upd7220 *gdc,\n                                  const tnc_l8_partition *part,\n                                  unsigned dst_base_y, unsigned line_height,\n                                  unsigned effective_pitch)\n{\n    unsigned cell_y;\n\n    for (cell_y = 0u; cell_y < part->length; cell_y += line_height) {\n        unsigned cell_height = line_height;\n        uint32_t line_base;\n        unsigned word_column = 0u;\n\n        if (cell_height > (unsigned)part->length - cell_y)\n            cell_height = (unsigned)part->length - cell_y;\n        line_base = part->start + (cell_y / line_height) * effective_pitch;\n\n        while (word_column < 32u) {\n            uint32_t word = (line_base + word_column) & 0x7fffu;\n\n            if ((word & 1u) == 0u && word_column + 1u < 32u) {\n                uint32_t pair = load_backing_pair32(gdc, word);\n                render_text_cell((uint16_t)pair, dst_base_y, cell_y,\n                                 cell_height, word_column);\n                render_text_cell((uint16_t)(pair >> 16), dst_base_y, cell_y,\n                                 cell_height, word_column + 1u);\n                word_column += 2u;\n            } else {\n                render_text_cell(load_backing_word16(gdc, word),\n                                 dst_base_y, cell_y, cell_height, word_column);\n                ++word_column;\n            }\n        }\n    }\n}\n\nstatic void render_graphics_word'''
+          s, n = pattern.subn(replacement, s, count=1)
+          assert n == 1
+
+          s = s.replace('load_scanout_pair32', 'load_backing_pair32')
+          s = s.replace('load_scanout_word16', 'load_backing_word16')
+
+          marker = 'static bool render_tnc_native(void)\n'
+          assert marker in s
+          callbacks = '''static void native_l8_invalidate(void *opaque,\n                                 const tnc155_upd7220 *gdc)\n{\n    (void)opaque;\n    (void)gdc;\n    s_native_full_redraw = 1u;\n}\n\nstatic void native_l8_word_written(void *opaque,\n                                   const tnc155_upd7220 *gdc,\n                                   uint32_t word, uint16_t value)\n{\n    unsigned active_height;\n    unsigned line_height;\n    unsigned effective_pitch;\n    unsigned native_y0;\n    unsigned base_y = 0u;\n    unsigned area;\n\n    (void)opaque;\n    if (s_native_full_redraw != 0u || !gdc->display_enabled)\n        return;\n\n    active_height = tnc155_video_active_height(s_machine);\n    if (active_height > TNC_NATIVE_HEIGHT)\n        active_height = TNC_NATIVE_HEIGHT;\n    native_y0 = (TNC_NATIVE_HEIGHT - active_height) / 2u;\n    line_height = gdc->lines_per_character != 0u ?\n                  gdc->lines_per_character : 1u;\n    effective_pitch = gdc->pitch != 0u ? gdc->pitch : 1u;\n    word &= 0x7fffu;\n\n    for (area = 0u; area < 4u && base_y < active_height; ++area) {\n        tnc_l8_partition part = decode_partition(gdc, area);\n        unsigned length = part.length;\n        unsigned pitch;\n        uint32_t delta;\n        unsigned local;\n        unsigned column;\n\n        if (length == 0u && part.graphics)\n            length = 0x400u;\n        if (length == 0u)\n            continue;\n        if (length > active_height - base_y)\n            length = active_height - base_y;\n\n        pitch = effective_pitch;\n        if (part.graphics && gdc->display_mode == TNC155_GDC_MODE_MIXED)\n            pitch >>= 1;\n        if (pitch == 0u)\n            pitch = 1u;\n\n        delta = (word - (part.start & 0x7fffu)) & 0x7fffu;\n        local = (unsigned)(delta / pitch);\n        column = (unsigned)(delta % pitch);\n\n        if (part.graphics) {\n            if (local < length && column < 32u) {\n                uint8_t *row = s_native_frame +\n                    (size_t)(native_y0 + base_y + local) * TNC_NATIVE_WIDTH;\n                render_graphics_word(row, column, value);\n            }\n        } else {\n            unsigned cell_y = local * line_height;\n            if (column < 32u && cell_y < length) {\n                unsigned cell_height = line_height;\n                if (cell_height > length - cell_y)\n                    cell_height = length - cell_y;\n                render_text_cell(value, native_y0 + base_y, cell_y,\n                                 cell_height, column);\n            }\n        }\n        base_y += length;\n    }\n}\n\n'''
+          s = s.replace(marker, callbacks + marker, 1)
+
+          s = s.replace('''    const tnc155_rom_view *font = tnc155_rom_get(TNC155_ROM_P1);\n''', '', 1)
+          s = s.replace('''    if (font == NULL || font->bytes == NULL || font->size < 0x4000u)\n        return false;\n''', '', 1)
+          old = '''            render_text_partition(gdc, font, &part, native_y0 + base_y,\n                                  line_height, effective_pitch);'''
+          new = '''            render_text_partition(gdc, &part, native_y0 + base_y,\n                                  line_height, effective_pitch);'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''done:\n    /* AXI SRAM is in the default cacheable SRAM region. DMA2D cannot see\n       dirty M7 D-cache lines, so publish the complete native image once per\n       redraw. Address and byte count are both cache-line aligned. */\n    SCB_CleanDCache_by_Addr((uint32_t *)(void *)s_native_frame,\n                            (int32_t)TNC_NATIVE_BYTES);\n    __DSB();\n    return true;\n}'''
+          new = '''done:\n    s_native_full_redraw = 0u;\n    return true;\n}'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''    if (redraw_tnc) {\n        if (!render_tnc_native()) {\n            g_tnc155_faulted = 1u;\n            return false;\n        }\n        dma_ok = dma2d_copy_tnc(TNC_NATIVE_ADDRESS,\n                                framebuffer_tnc_address(back_fb), false);\n    } else {'''
+          new = '''    if (redraw_tnc) {\n        if (s_native_full_redraw != 0u && !render_tnc_native()) {\n            g_tnc155_faulted = 1u;\n            return false;\n        }\n        /* Normal text/graphics writes have already updated the AXI L8 image\n           incrementally.  Publish its dirty cache lines to DMA2D once per\n           presented frame; mapping/mode changes take the full rebuild above. */\n        SCB_CleanDCache_by_Addr((uint32_t *)(void *)s_native_frame,\n                                (int32_t)TNC_NATIVE_BYTES);\n        __DSB();\n        dma_ok = dma2d_copy_tnc(TNC_NATIVE_ADDRESS,\n                                framebuffer_tnc_address(back_fb), false);\n    } else {'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''    init_raster_luts();\n    if (!configure_dma2d_raw_l8())'''
+          new = '''    if (!init_raster_luts())\n        return false;\n    if (!configure_dma2d_raw_l8())'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''    if (!tnc155_machine_init(s_machine))\n        return false;\n\n    if (tnc155_default_user_ram_size != sizeof(s_machine->main.user_ram))'''
+          new = '''    if (!tnc155_machine_init(s_machine))\n        return false;\n    s_native_full_redraw = 1u;\n    tnc155_upd7220_set_native_video_callbacks(\n        &s_machine->clp.gdc, native_l8_word_written,\n        native_l8_invalidate, NULL);\n\n    if (tnc155_default_user_ram_size != sizeof(s_machine->main.user_ram))'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+      - name: Install ARM toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+      - name: Build STM32H7 TNC155
+        run: make -f Makefile.tnc155 -j2 TNC155_DIR=tnc155-emulator
+      - name: Commit functional patch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Core/Src/tnc155_firmware.c
+          git commit -m 'Render uPD7220 directly to native L8 cache'
+          git push origin HEAD:tnc155-tinyusb-cdc
