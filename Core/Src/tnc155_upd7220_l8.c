@@ -30,6 +30,8 @@
 
 #define DEFAULT_TEXT_HEIGHT         468u
 #define DEFAULT_GRAPHICS_HEIGHT     490u
+#define TEXT_SHADOW_WORDS           0x8000u
+#define TEXT_DIRTY_CAPACITY         4096u
 
 /* The STM32 firmware contains one CLP GDC.  Binding the target surface here
    keeps the public emulator state compact conceptually: the uPD7220 command
@@ -41,6 +43,11 @@ static const uint8_t *s_atlas;
 static unsigned s_width;
 static unsigned s_height;
 static unsigned s_stride;
+static uint16_t s_text_shadow[TEXT_SHADOW_WORDS];
+static uint8_t s_text_valid[TEXT_SHADOW_WORDS / 8u];
+static uint8_t s_text_dirty[TEXT_SHADOW_WORDS / 8u];
+static uint16_t s_text_dirty_words[TEXT_DIRTY_CAPACITY];
+static unsigned s_text_dirty_count;
 
 typedef struct l8_partition {
     uint32_t start;
@@ -327,6 +334,53 @@ static void render_graphics_word(uint16_t data, uint16_t mask, uint8_t mod,
     }
 }
 
+static bool text_bit_test(const uint8_t *bits, unsigned word)
+{
+    return (bits[word >> 3] & (uint8_t)(1u << (word & 7u))) != 0u;
+}
+
+static void text_bit_set(uint8_t *bits, unsigned word)
+{
+    bits[word >> 3] |= (uint8_t)(1u << (word & 7u));
+}
+
+static void invalidate_text_shadow(void)
+{
+    memset(s_text_valid, 0, sizeof(s_text_valid));
+    memset(s_text_dirty, 0, sizeof(s_text_dirty));
+    s_text_dirty_count = 0u;
+}
+
+static void queue_text_word(uint32_t word, uint16_t value)
+{
+    unsigned index = (unsigned)(word & 0x7fffu);
+
+    if (text_bit_test(s_text_valid, index) &&
+        s_text_shadow[index] == value)
+        return;
+
+    s_text_shadow[index] = value;
+    text_bit_set(s_text_valid, index);
+    if (!text_bit_test(s_text_dirty, index) &&
+        s_text_dirty_count < TEXT_DIRTY_CAPACITY) {
+        text_bit_set(s_text_dirty, index);
+        s_text_dirty_words[s_text_dirty_count++] = (uint16_t)index;
+    }
+}
+
+static void flush_text_words(tnc155_upd7220 *gdc)
+{
+    unsigned i;
+
+    for (i = 0u; i < s_text_dirty_count; ++i) {
+        unsigned word = s_text_dirty_words[i];
+        l8_location loc = locate_word(gdc, word);
+        render_text_cell(s_text_shadow[word], &loc);
+    }
+    memset(s_text_dirty, 0, sizeof(s_text_dirty));
+    s_text_dirty_count = 0u;
+}
+
 static void direct_write_word(tnc155_upd7220 *gdc, uint8_t type, uint8_t mod,
                               uint16_t data, uint16_t mask)
 {
@@ -350,10 +404,10 @@ static void direct_write_word(tnc155_upd7220 *gdc, uint8_t type, uint8_t mod,
         render_graphics_word(effective_data, effective_mask, mod, &loc);
     } else if (loc.valid && type == 0u && effective_mask == 0xffffu &&
                (mod & 3u) == 0u) {
-        /* TNC character traffic is full-word WDAT.  The two bytes are the
-           character code and P1 mode/attribute byte, so no emulated VRAM is
-           needed: blit the final glyph directly into L8. */
-        render_text_cell(data, &loc);
+        /* Buffer character traffic and render only changed cells when the
+           WDAT stream commits.  The TNC repeatedly writes unchanged display
+           words, which must not expand into hundreds of redundant L8 stores. */
+        queue_text_word(gdc->cursor, data);
     }
 
     gdc->last_vram_word = gdc->cursor & 0x3ffffu;
@@ -801,6 +855,7 @@ void tnc155_upd7220_init(tnc155_upd7220 *gdc)
     gdc->mask = 0xffffu;
     gdc->lines_per_character = 1u;
     reset_figure_parameters(gdc);
+    invalidate_text_shadow();
 }
 
 void tnc155_upd7220_bind_l8(tnc155_upd7220 *gdc,
@@ -857,8 +912,10 @@ uint8_t tnc155_upd7220_read_data(tnc155_upd7220 *gdc)
 
 static void process_command(tnc155_upd7220 *gdc, uint8_t command)
 {
-    if ((gdc->command & 0xe4u) == 0x20u && gdc->parameter_count != 0u)
+    if ((gdc->command & 0xe4u) == 0x20u && gdc->parameter_count != 0u) {
+        flush_text_words(gdc);
         ++gdc->scanout_commits;
+    }
     ++gdc->command_count;
     ++gdc->command_histogram[command];
     gdc->command = command;
@@ -872,6 +929,7 @@ static void process_command(tnc155_upd7220 *gdc, uint8_t command)
         gdc->cursor = 0u;
         gdc->drawing_in_progress = false;
         reset_figure_parameters(gdc);
+        invalidate_text_shadow();
         if (gdc == s_bound_gdc && s_l8 != NULL)
             memset(s_l8, L8_OFF_NORMAL, (size_t)s_stride * s_height);
     } else if ((command & 0xfeu) == 0x0eu) {
@@ -898,6 +956,7 @@ static void process_command(tnc155_upd7220 *gdc, uint8_t command)
 static void decode_sync_parameter(tnc155_upd7220 *gdc, unsigned index,
                                   uint8_t value)
 {
+    invalidate_text_shadow();
     if (index == 0u) {
         gdc->display_mode = decode_display_mode(value);
     } else if (index == 1u) {
