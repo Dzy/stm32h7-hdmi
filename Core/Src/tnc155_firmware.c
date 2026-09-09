@@ -17,7 +17,7 @@
 
 #define TNC155_MACHINE_ADDRESS       (SDRAM_BASE_ADDRESS + (10U * 1024U * 1024U))
 #define TNC155_VIDEO_MIN_PERIOD_MS   20U
-#define TNC155_DEBUG_PERIOD_MS       200U
+#define TNC155_DEBUG_PERIOD_MS       1000U
 #define TNC155_STEP_SLICE            4096U
 #define TNC155_HW_TICK_HZ            1000U
 #define TNC155_DEC_TICKS_PER_MS      (TNC155_MAIN_CPU_CLOCK_HZ / 16000U)
@@ -731,14 +731,20 @@ void TNC155_Firmware_Task(void)
     debug_due = (int32_t)(now - s_next_debug_ms) >= 0;
     redraw_tnc = dirty && video_due;
 
-    if (s_swap_pending == 0u && (redraw_tnc || debug_due)) {
-        if (present_frame(redraw_tnc)) {
-            if (redraw_tnc) {
-                remember_rendered_gdc_state();
-                s_next_video_ms = now + TNC155_VIDEO_MIN_PERIOD_MS;
-            }
+    if (s_swap_pending == 0u && redraw_tnc) {
+        if (present_frame(true)) {
+            remember_rendered_gdc_state();
+            s_next_video_ms = now + TNC155_VIDEO_MIN_PERIOD_MS;
             s_next_debug_ms = now + TNC155_DEBUG_PERIOD_MS;
         }
+    } else if (s_swap_pending == 0u && debug_due) {
+        /* Diagnostics do not justify copying the TNC window to the other
+           SDRAM framebuffer and consuming a page flip.  Updating the small
+           overlay in place avoids a DMA2D burst competing with LTDC scanout. */
+        draw_debug_overlay((uint8_t *)(uintptr_t)
+                           framebuffer_address(s_front_fb));
+        __DSB();
+        s_next_debug_ms = now + TNC155_DEBUG_PERIOD_MS;
     }
 }
 
