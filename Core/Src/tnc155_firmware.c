@@ -32,6 +32,16 @@
 #define TNC_NATIVE_HEIGHT       TNC155_VIDEO_HEIGHT
 #define TNC_NATIVE_BYTES        ((size_t)TNC_NATIVE_WIDTH * TNC_NATIVE_HEIGHT)
 #define TNC_NATIVE_ADDRESS      AXI_SRAM_BASE_ADDRESS
+#define TNC_FONT_ATLAS_BANKS    6U
+#define TNC_FONT_ATLAS_GLYPHS   64U
+#define TNC_FONT_ATLAS_ROWS     32U
+#define TNC_FONT_ATLAS_ROW_BYTES 16U
+#define TNC_FONT_ATLAS_BYTES    ((size_t)TNC_FONT_ATLAS_BANKS * \
+                                 TNC_FONT_ATLAS_GLYPHS * \
+                                 TNC_FONT_ATLAS_ROWS * \
+                                 TNC_FONT_ATLAS_ROW_BYTES)
+#define TNC_FONT_ATLAS_ADDRESS  (TNC_NATIVE_ADDRESS + \
+                                 ((TNC_NATIVE_BYTES + 31U) & ~(size_t)31U))
 #define TNC_DMA2D_WIDTH         (TNC_NATIVE_WIDTH / 2U)
 #define TNC_DMA2D_FB_STRIDE     (HDMI_WIDTH / 2U)
 #define TNC_DMA2D_LINE_OFFSET   (TNC_DMA2D_FB_STRIDE - TNC_DMA2D_WIDTH)
@@ -64,6 +74,9 @@ _Static_assert((TNC_NATIVE_WIDTH & 1U) == 0U && (HDMI_WIDTH & 1U) == 0U &&
                "DMA2D raw L8 blit requires even width and X alignment");
 _Static_assert(TNC_NATIVE_BYTES <= (512U * 1024U),
                "TNC155 native staging image does not fit AXI SRAM");
+_Static_assert((TNC_FONT_ATLAS_ADDRESS + TNC_FONT_ATLAS_BYTES) <=
+               (AXI_SRAM_BASE_ADDRESS + AXI_SRAM_SIZE_BYTES),
+               "TNC155 native L8 image plus font atlas do not fit AXI SRAM");
 _Static_assert((offsetof(tnc155_upd7220, scanout_character_video) & 3u) == 0u,
                "uPD7220 scanout must be 32-bit aligned");
 _Static_assert((TNC155_MAIN_CPU_CLOCK_HZ % 16000U) == 0U,
@@ -75,13 +88,15 @@ static tnc155_machine *const s_machine =
     (tnc155_machine *)(uintptr_t)TNC155_MACHINE_ADDRESS;
 static uint8_t *const s_native_frame =
     (uint8_t *)(uintptr_t)TNC_NATIVE_ADDRESS;
+static uint8_t *const s_font_atlas =
+    (uint8_t *)(uintptr_t)TNC_FONT_ATLAS_ADDRESS;
 static tnc155_serial_keyboard s_keyboard;
 
-/* DTCM-resident expansion tables. A P1 row byte becomes sixteen final L8
-   bytes (each P1 bit is two output pixels). All eight P1 modes use the same
-   table, so the small-font vertical variants and large-font data remain
-   entirely ROM-defined. */
-static uint32_t s_text_row_lut[4][256][4];
+/* The P1 font is expanded once at boot into a byte-per-pixel L8 mask atlas
+   in AXI SRAM.  Modes 0..2 share the canonical mode-0 glyph bank and apply
+   only their measured vertical offsets when blitted; modes 3..7 each have
+   one bank.  Per-cell inverse/bright colours are then four 32-bit mask ops
+   per row instead of ROM lookup + bit expansion on every redraw. */
 static uint32_t s_graphics_byte_lut[256][2];
 
 static uint32_t s_next_video_ms;
@@ -89,6 +104,7 @@ static uint32_t s_next_debug_ms;
 static uint32_t s_rendered_fifo_entries;
 static uint32_t s_rendered_words_written;
 static uint32_t s_rendered_scanout_commits;
+static uint8_t s_native_full_redraw;
 static volatile uint32_t s_pending_hw_ms;
 static volatile uint8_t s_hw_time_active;
 static volatile uint8_t s_front_fb;
@@ -361,28 +377,31 @@ static void clear_framebuffer(uint32_t address)
     __DSB();
 }
 
-static void init_raster_luts(void)
+static bool init_raster_luts(void)
 {
-    unsigned attr;
+    unsigned bank;
+    unsigned glyph;
+    unsigned row;
     unsigned pattern;
 
-    for (attr = 0u; attr < 4u; ++attr) {
-        bool inverse = (attr & 1u) != 0u;
-        bool bright = (attr & 2u) != 0u;
-        uint8_t off = bright ? TNC_L8_OFF_BRIGHT : TNC_L8_OFF_NORMAL;
-        uint8_t on = bright ? TNC_L8_ON_BRIGHT : TNC_L8_ON_NORMAL;
 
-        for (pattern = 0u; pattern < 256u; ++pattern) {
-            uint8_t *expanded = (uint8_t *)&s_text_row_lut[attr][pattern][0];
-            unsigned bit;
-            for (bit = 0u; bit < 8u; ++bit) {
-                bool set = (pattern & (0x80u >> bit)) != 0u;
-                uint8_t colour;
-                if (inverse)
-                    set = !set;
-                colour = set ? on : off;
-                expanded[bit * 2u] = colour;
-                expanded[bit * 2u + 1u] = colour;
+    for (bank = 0u; bank < TNC_FONT_ATLAS_BANKS; ++bank) {
+        unsigned p1_mode = bank == 0u ? 0u : bank + 2u;
+        for (glyph = 0u; glyph < TNC_FONT_ATLAS_GLYPHS; ++glyph) {
+            for (row = 0u; row < TNC_FONT_ATLAS_ROWS; ++row) {
+                uint8_t bits = font->bytes[
+                    ((size_t)p1_mode * 64u + glyph) * 32u + row];
+                uint8_t *dst = s_font_atlas +
+                    (((size_t)bank * TNC_FONT_ATLAS_GLYPHS + glyph) *
+                     TNC_FONT_ATLAS_ROWS + row) * TNC_FONT_ATLAS_ROW_BYTES;
+                unsigned bit;
+
+                for (bit = 0u; bit < 8u; ++bit) {
+                    uint8_t mask = (bits & (0x80u >> bit)) != 0u ?
+                                   0xffu : 0x00u;
+                    dst[bit * 2u] = mask;
+                    dst[bit * 2u + 1u] = mask;
+                }
             }
         }
     }
@@ -394,6 +413,7 @@ static void init_raster_luts(void)
             expanded[bit] = (pattern & (1u << bit)) != 0u ?
                             TNC_L8_ON_NORMAL : TNC_L8_OFF_NORMAL;
     }
+    return true;
 }
 
 static bool configure_dma2d_raw_l8(void)
@@ -476,96 +496,91 @@ static int p1_small_font_y_offset(unsigned mode, unsigned character)
     return 0;
 }
 
-static void copy_text_row(unsigned attr, uint8_t glyph, uint32_t *dst)
+static unsigned p1_atlas_bank(unsigned p1_mode)
 {
-    const uint32_t *src = &s_text_row_lut[attr][glyph][0];
-    dst[0] = src[0];
-    dst[1] = src[1];
-    dst[2] = src[2];
-    dst[3] = src[3];
+    return p1_mode <= 2u ? 0u : p1_mode - 2u;
 }
 
-static uint16_t load_scanout_word16(const tnc155_upd7220 *gdc, uint32_t word)
+static void blit_atlas_row(unsigned attr, const uint32_t *mask,
+                           uint32_t *dst)
+{
+    uint32_t off;
+    uint32_t mix;
+    unsigned i;
+
+    switch (attr & 3u) {
+    case 0u:
+        off = 0x00000000u;
+        mix = 0xdfdfdfdfu;
+        break;
+    case 1u:
+        off = 0xdfdfdfdfu;
+        mix = 0xdfdfdfdfu;
+        break;
+    case 2u:
+        off = 0x04040404u;
+        mix = 0x75757575u;
+        break;
+    default:
+        off = 0x71717171u;
+        mix = 0x75757575u;
+        break;
+    }
+
+    for (i = 0u; i < 4u; ++i)
+        dst[i] = off ^ (mask[i] & mix);
+}
+
+static uint16_t load_backing_word16(const tnc155_upd7220 *gdc, uint32_t word)
 {
     uint32_t address = (word & 0x7fffu) * 2u;
-    return (uint16_t)((uint16_t)gdc->scanout_character_video[address] << 8 |
-                      gdc->scanout_character_video[address + 1u]);
+    return (uint16_t)((uint16_t)gdc->character_video_dram[address] << 8 |
+                      gdc->character_video_dram[address + 1u]);
 }
 
-/* even_word selects two adjacent emulated 16-bit uPD7220 words.  The backing
-   array is 32-bit aligned by the emulator core, so Cortex-M7 performs one
-   aligned 32-bit load. REV16 converts the two big-endian GDC words into host
-   halfwords: low 16 bits = even_word, high 16 bits = even_word + 1. */
-static uint32_t load_scanout_pair32(const tnc155_upd7220 *gdc,
+static uint32_t load_backing_pair32(const tnc155_upd7220 *gdc,
                                     uint32_t even_word)
 {
     uint32_t raw;
     uint32_t address = (even_word & 0x7fffu) * 2u;
-    memcpy(&raw, &gdc->scanout_character_video[address], sizeof(raw));
+    memcpy(&raw, &gdc->character_video_dram[address], sizeof(raw));
     return __REV16(raw);
 }
 
-static void render_text_cell(const tnc155_rom_view *font, uint16_t cell,
-                             unsigned dst_base_y, unsigned cell_y,
-                             unsigned cell_height, unsigned word_column)
+static void render_text_cell(uint16_t cell, unsigned dst_base_y,
+                             unsigned cell_y, unsigned cell_height,
+                             unsigned word_column)
 {
+    static const uint32_t zero_row[4] = {0u, 0u, 0u, 0u};
     uint8_t ascii = (uint8_t)cell;
     uint8_t mode_data = (uint8_t)(cell >> 8);
     unsigned p1_mode = (mode_data >> 2) & 0x07u;
     unsigned character = ascii & 0x3fu;
     unsigned attr = ((mode_data & 0x02u) != 0u ? 2u : 0u) |
                     ((mode_data & 0x01u) != 0u ? 1u : 0u);
-    bool inverse = (attr & 1u) != 0u;
-    bool small_font = p1_mode <= 2u;
-    int y_offset = small_font ?
+    unsigned bank = p1_atlas_bank(p1_mode);
+    int y_offset = p1_mode <= 2u ?
                    p1_small_font_y_offset(p1_mode, character) : 0;
-    size_t glyph_base = ((size_t)(small_font ? 0u : p1_mode) * 64u +
-                         character) * 32u;
     unsigned row_in_cell;
-
-    if (small_font && !inverse) {
-        /* Canonical mode-0 small glyphs occupy rows 8..24. Move that one
-           source glyph vertically instead of processing blank rows from
-           three duplicate P1 banks. The staging image is already black, so
-           zero source rows require no stores. */
-        int first = 8 + y_offset;
-        int last = 24 + y_offset;
-        if (first < 0)
-            first = 0;
-        if (last >= (int)cell_height)
-            last = (int)cell_height - 1;
-
-        for (; first <= last; ++first) {
-            int source_row = first - y_offset;
-            uint8_t glyph = font->bytes[glyph_base + (unsigned)source_row];
-            uint32_t *dst;
-            if (glyph == 0u)
-                continue;
-            dst = (uint32_t *)(void *)(s_native_frame +
-                (size_t)(dst_base_y + cell_y + (unsigned)first) *
-                TNC_NATIVE_WIDTH + word_column * 16u);
-            copy_text_row(attr, glyph, dst);
-        }
-        return;
-    }
 
     for (row_in_cell = 0u; row_in_cell < cell_height; ++row_in_cell) {
         int source_row = (int)row_in_cell - y_offset;
-        uint8_t glyph = (source_row >= 0 && source_row < 32) ?
-                        font->bytes[glyph_base + (unsigned)source_row] : 0u;
-        uint32_t *dst;
-
-        if (!inverse && glyph == 0u)
-            continue;
-        dst = (uint32_t *)(void *)(s_native_frame +
+        const uint32_t *src = zero_row;
+        uint32_t *dst = (uint32_t *)(void *)(s_native_frame +
             (size_t)(dst_base_y + cell_y + row_in_cell) *
             TNC_NATIVE_WIDTH + word_column * 16u);
-        copy_text_row(attr, glyph, dst);
+
+        if (source_row >= 0 && source_row < (int)TNC_FONT_ATLAS_ROWS) {
+            src = (const uint32_t *)(const void *)(s_font_atlas +
+                (((size_t)bank * TNC_FONT_ATLAS_GLYPHS + character) *
+                 TNC_FONT_ATLAS_ROWS + (unsigned)source_row) *
+                TNC_FONT_ATLAS_ROW_BYTES);
+        }
+        blit_atlas_row(attr, src, dst);
     }
 }
 
 static void render_text_partition(const tnc155_upd7220 *gdc,
-                                  const tnc155_rom_view *font,
                                   const tnc_l8_partition *part,
                                   unsigned dst_base_y, unsigned line_height,
                                   unsigned effective_pitch)
@@ -581,21 +596,18 @@ static void render_text_partition(const tnc155_upd7220 *gdc,
             cell_height = (unsigned)part->length - cell_y;
         line_base = part->start + (cell_y / line_height) * effective_pitch;
 
-        /* Use aligned 32-bit scanout reads whenever two adjacent GDC cells
-           are available. Odd partition starts take one scalar word first. */
         while (word_column < 32u) {
             uint32_t word = (line_base + word_column) & 0x7fffu;
 
             if ((word & 1u) == 0u && word_column + 1u < 32u) {
-                uint32_t pair = load_scanout_pair32(gdc, word);
-                render_text_cell(font, (uint16_t)pair,
-                                 dst_base_y, cell_y, cell_height, word_column);
-                render_text_cell(font, (uint16_t)(pair >> 16),
-                                 dst_base_y, cell_y, cell_height,
-                                 word_column + 1u);
+                uint32_t pair = load_backing_pair32(gdc, word);
+                render_text_cell((uint16_t)pair, dst_base_y, cell_y,
+                                 cell_height, word_column);
+                render_text_cell((uint16_t)(pair >> 16), dst_base_y, cell_y,
+                                 cell_height, word_column + 1u);
                 word_column += 2u;
             } else {
-                render_text_cell(font, load_scanout_word16(gdc, word),
+                render_text_cell(load_backing_word16(gdc, word),
                                  dst_base_y, cell_y, cell_height, word_column);
                 ++word_column;
             }
@@ -639,17 +651,94 @@ static void render_graphics_partition(const tnc155_upd7220 *gdc,
             uint32_t word = (line_base + word_column) & 0x7fffu;
 
             if ((word & 1u) == 0u && word_column + 1u < 32u) {
-                uint32_t pair = load_scanout_pair32(gdc, word);
+                uint32_t pair = load_backing_pair32(gdc, word);
                 render_graphics_word(row, word_column, (uint16_t)pair);
                 render_graphics_word(row, word_column + 1u,
                                      (uint16_t)(pair >> 16));
                 word_column += 2u;
             } else {
                 render_graphics_word(row, word_column,
-                                     load_scanout_word16(gdc, word));
+                                     load_backing_word16(gdc, word));
                 ++word_column;
             }
         }
+    }
+}
+
+static void native_l8_invalidate(void *opaque,
+                                 const tnc155_upd7220 *gdc)
+{
+    (void)opaque;
+    (void)gdc;
+    s_native_full_redraw = 1u;
+}
+
+static void native_l8_word_written(void *opaque,
+                                   const tnc155_upd7220 *gdc,
+                                   uint32_t word, uint16_t value)
+{
+    unsigned active_height;
+    unsigned line_height;
+    unsigned effective_pitch;
+    unsigned native_y0;
+    unsigned base_y = 0u;
+    unsigned area;
+
+    (void)opaque;
+    if (s_native_full_redraw != 0u || !gdc->display_enabled)
+        return;
+
+    active_height = tnc155_video_active_height(s_machine);
+    if (active_height > TNC_NATIVE_HEIGHT)
+        active_height = TNC_NATIVE_HEIGHT;
+    native_y0 = (TNC_NATIVE_HEIGHT - active_height) / 2u;
+    line_height = gdc->lines_per_character != 0u ?
+                  gdc->lines_per_character : 1u;
+    effective_pitch = gdc->pitch != 0u ? gdc->pitch : 1u;
+    word &= 0x7fffu;
+
+    for (area = 0u; area < 4u && base_y < active_height; ++area) {
+        tnc_l8_partition part = decode_partition(gdc, area);
+        unsigned length = part.length;
+        unsigned pitch;
+        uint32_t delta;
+        unsigned local;
+        unsigned column;
+
+        if (length == 0u && part.graphics)
+            length = 0x400u;
+        if (length == 0u)
+            continue;
+        if (length > active_height - base_y)
+            length = active_height - base_y;
+
+        pitch = effective_pitch;
+        if (part.graphics && gdc->display_mode == TNC155_GDC_MODE_MIXED)
+            pitch >>= 1;
+        if (pitch == 0u)
+            pitch = 1u;
+
+        delta = (word - (part.start & 0x7fffu)) & 0x7fffu;
+        local = (unsigned)(delta / pitch);
+        column = (unsigned)(delta % pitch);
+
+        if (part.graphics) {
+            if (local < length && column < 32u) {
+                uint8_t *row = s_native_frame +
+                    (size_t)(native_y0 + base_y + local) * TNC_NATIVE_WIDTH;
+                render_graphics_word(row, column, value);
+            }
+        } else {
+            unsigned cell_y = local * line_height;
+            if (column < 32u && cell_y < length) {
+                unsigned cell_height = line_height;
+                if (cell_height > length - cell_y)
+                    cell_height = length - cell_y;
+                render_text_cell(value, native_y0 + base_y, cell_y,
+                                 cell_height, column);
+            }
+        }
+        base_y += length;
     }
 }
 
@@ -692,18 +781,13 @@ static bool render_tnc_native(void)
             render_graphics_partition(gdc, &part, native_y0 + base_y,
                                       effective_pitch);
         else
-            render_text_partition(gdc, font, &part, native_y0 + base_y,
+            render_text_partition(gdc, &part, native_y0 + base_y,
                                   line_height, effective_pitch);
         base_y += length;
     }
 
 done:
-    /* AXI SRAM is in the default cacheable SRAM region. DMA2D cannot see
-       dirty M7 D-cache lines, so publish the complete native image once per
-       redraw. Address and byte count are both cache-line aligned. */
-    SCB_CleanDCache_by_Addr((uint32_t *)(void *)s_native_frame,
-                            (int32_t)TNC_NATIVE_BYTES);
-    __DSB();
+    s_native_full_redraw = 0u;
     return true;
 }
 
@@ -833,10 +917,16 @@ static bool present_frame(bool redraw_tnc)
     dst = (uint8_t *)(uintptr_t)framebuffer_address(back_fb);
 
     if (redraw_tnc) {
-        if (!render_tnc_native()) {
+        if (s_native_full_redraw != 0u && !render_tnc_native()) {
             g_tnc155_faulted = 1u;
             return false;
         }
+        /* Normal text/graphics writes have already updated the AXI L8 image
+           incrementally.  Publish its dirty cache lines to DMA2D once per
+           presented frame; mapping/mode changes take the full rebuild above. */
+        SCB_CleanDCache_by_Addr((uint32_t *)(void *)s_native_frame,
+                                (int32_t)TNC_NATIVE_BYTES);
+        __DSB();
         dma_ok = dma2d_copy_tnc(TNC_NATIVE_ADDRESS,
                                 framebuffer_tnc_address(back_fb), false);
     } else {
@@ -884,7 +974,8 @@ bool TNC155_Firmware_Init(void)
     DWT->CYCCNT = 0u;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 
-    init_raster_luts();
+    if (!init_raster_luts())
+        return false;
     if (!configure_dma2d_raw_l8())
         return false;
 
@@ -897,6 +988,10 @@ bool TNC155_Firmware_Init(void)
 
     if (!tnc155_machine_init(s_machine))
         return false;
+    s_native_full_redraw = 1u;
+    tnc155_upd7220_set_native_video_callbacks(
+        &s_machine->clp.gdc, native_l8_word_written,
+        native_l8_invalidate, NULL);
 
     if (tnc155_default_user_ram_size != sizeof(s_machine->main.user_ram))
         return false;
