@@ -25,6 +25,7 @@ endif
 TNC155_GENERATED_DIR = $(BUILD_DIR)/generated
 TNC155_ROM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_rom_images.h
 TNC155_USER_RAM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_default_user_ram.h
+TMS9995_MUSASHI_SOURCE = $(TNC155_GENERATED_DIR)/tms9995_musashi_dispatch.c
 TNC155_ROM_DIR = $(TNC155_DIR)/roms
 TNC155_ROM5_FILE = $(TNC155_DIR)/rom-overrides/new_2340005E_nr5.bin
 TNC155_ROM_FILES = \
@@ -156,9 +157,8 @@ CFLAGS += -g -gdwarf-2
 endif
 CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 
-# TMS9995 is deliberately a non-LTO object.  The linker can then identify its
-# input sections and place executable code in ITCM and compiler-generated
-# constants/jump tables in DTCM.  The rest of the firmware remains LTO-built.
+# TMS9995 remains a non-LTO object so its hot executable sections can live in
+# ITCM.  The 256 KiB Musashi jump table uses its own section and stays in FLASH.
 TMS9995_OBJECT = $(BUILD_DIR)/tnc155/src/cpu/tms9995.o
 TMS9995_CFLAGS = $(filter-out -flto -fuse-linker-plugin,$(CFLAGS)) -fno-lto
 
@@ -178,12 +178,17 @@ all: check-tnc155 $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_
 
 .PHONY: check-tnc155
 check-tnc155:
-	@test -f "$(TNC155_DIR)/src/frontend/serial_keyboard_protocol.c" || \
-	  (echo "TNC155_DIR must point to tnc155-emulator branch stm32-portable-serial" >&2; exit 1)
+	@test -f "$(TNC155_DIR)/tools/generate_tms9995_musashi_dispatch.py" || \
+	  (echo "TNC155_DIR must point to tnc155-emulator branch stm32-musashi-jumptable64k" >&2; exit 1)
 
 $(TNC155_ROM_HEADER): $(TNC155_DIR)/tools/embed_roms.py $(TNC155_ROM_FILES)
 	@mkdir -p $(dir $@)
 	python3 "$(TNC155_DIR)/tools/embed_roms.py" "$(TNC155_ROM_DIR)" "$@" --p5 "$(TNC155_ROM5_FILE)"
+
+$(TMS9995_MUSASHI_SOURCE): $(TNC155_DIR)/src/cpu/tms9995.c $(TNC155_DIR)/tools/generate_tms9995_musashi_dispatch.py
+	@mkdir -p $(dir $@)
+	python3 "$(TNC155_DIR)/tools/generate_tms9995_musashi_dispatch.py" \
+	  "$(TNC155_DIR)/src/cpu/tms9995.c" "$@"
 
 # The exact supplied 72 KiB User RAM image is stored compactly in the HDMI
 # repository build tool.  Host Python expands it into normal firmware rodata;
@@ -212,11 +217,12 @@ $(BUILD_DIR)/%.o: %.s Makefile.tnc155
 	@mkdir -p $(dir $@)
 	$(AS) -c $(ASFLAGS) $< -o $@
 
-# Must precede the generic external-source rule: no LTO for this object so the
-# linker script can move its .text* and .rodata* sections into the TCMs.
-$(TMS9995_OBJECT): $(TNC155_DIR)/src/cpu/tms9995.c Makefile.tnc155 $(TNC155_ROM_HEADER)
+# Must precede the generic external-source rule.  Compile the generated
+# Musashi-dispatch source into the same tms9995.o name so ITCM placement of
+# .text* stays unchanged while .tms9995_jump_table remains in FLASH.
+$(TMS9995_OBJECT): $(TMS9995_MUSASHI_SOURCE) Makefile.tnc155 $(TNC155_ROM_HEADER)
 	@mkdir -p $(dir $@)
-	$(CC) -c $(TMS9995_CFLAGS) -Wa,-a,-ad,-alms=$(patsubst %.o,%.lst,$@) $< -o $@
+	$(CC) -c $(TMS9995_CFLAGS) -Wa,-a,-ad,-alms=$(patsubst %.o,%.lst,$@) $(TMS9995_MUSASHI_SOURCE) -o $@
 
 $(BUILD_DIR)/tnc155/%.o: $(TNC155_DIR)/%.c Makefile.tnc155 $(TNC155_ROM_HEADER)
 	@mkdir -p $(dir $@)
