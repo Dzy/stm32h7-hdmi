@@ -1,0 +1,81 @@
+name: one-shot prune GDC backing path
+
+on:
+  push:
+    paths:
+      - '.github/workflows/one-shot-prune-gdc-backing.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tnc155-tinyusb-cdc
+          fetch-depth: 0
+      - name: Remove obsolete backing renderer
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('Makefile.tnc155')
+          s = p.read_text()
+          s2 = s.replace('src/clp/video.c \\\n', '')
+          assert s2 != s
+          p.write_text(s2)
+
+          p = Path('Core/Src/tnc155_firmware.c')
+          s = p.read_text()
+
+          old = '''_Static_assert((offsetof(tnc155_upd7220, scanout_character_video) & 3u) == 0u,\n               "uPD7220 scanout must be 32-bit aligned");\n'''
+          assert old in s
+          s = s.replace(old, '', 1)
+
+          old = 'static uint32_t s_graphics_byte_lut[256][2];\n'
+          assert old in s
+          s = s.replace(old, '', 1)
+          old = 'static uint8_t s_native_full_redraw;\n'
+          assert old in s
+          s = s.replace(old, '', 1)
+
+          s = s.replace('    unsigned row;\n    unsigned pattern;\n',
+                        '    unsigned row;\n', 1)
+          pattern = re.compile(r'\n    for \(pattern = 0u; pattern < 256u; \+\+pattern\) \{.*?\n    \}\n    return true;', re.S)
+          s, n = pattern.subn('\n    return true;', s, count=1)
+          assert n == 1
+
+          pattern = re.compile(r'\ntypedef struct tnc_l8_partition \{.*?\nstatic bool gdc_video_dirty\(void\)', re.S)
+          s, n = pattern.subn('\nstatic bool gdc_video_dirty(void)', s, count=1)
+          assert n == 1
+
+          old = '''    if (redraw_tnc) {\n        /* The STM32 uPD7220 backend now executes WDAT/FIGD/GCHRD and text\n           glyph blits directly into this native L8 framebuffer.  There is\n           no GDC backing-store rebuild or scanout stage in the runtime path. */\n        SCB_CleanDCache_by_Addr((uint32_t *)(void *)s_native_frame,\n                                (int32_t)TNC_NATIVE_BYTES);\n        __DSB();\n        dma_ok = dma2d_copy_tnc(TNC_NATIVE_ADDRESS,\n                                framebuffer_tnc_address(back_fb), false);\n    } else {'''
+          new = '''    if (redraw_tnc) {\n        if (s_machine->clp.gdc.display_enabled) {\n            /* uPD7220 commands have already modified the final native L8\n               surface.  Cache maintenance is the only publication step. */\n            SCB_CleanDCache_by_Addr((uint32_t *)(void *)s_native_frame,\n                                    (int32_t)TNC_NATIVE_BYTES);\n            __DSB();\n            dma_ok = dma2d_copy_tnc(TNC_NATIVE_ADDRESS,\n                                    framebuffer_tnc_address(back_fb), false);\n        } else {\n            /* BCTRL/STOP blank the visible TNC window without destroying the\n               native L8 surface, so START can reveal it again immediately. */\n            unsigned y;\n            uint8_t *tnc = (uint8_t *)(uintptr_t)\n                           framebuffer_tnc_address(back_fb);\n            for (y = 0u; y < TNC_NATIVE_HEIGHT; ++y)\n                memset(tnc + (size_t)y * HDMI_WIDTH, 0, TNC_NATIVE_WIDTH);\n            dma_ok = true;\n        }\n    } else {'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''    s_native_full_redraw = 0u;\n    tnc155_upd7220_bind_l8(&s_machine->clp.gdc,'''
+          new = '''    tnc155_upd7220_bind_l8(&s_machine->clp.gdc,'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('Core/Src/tnc155_upd7220_l8.c')
+          s = p.read_text()
+          pattern = re.compile(r'\n/\* Kept only for ABI/source compatibility.*?\nvoid tnc155_upd7220_service', re.S)
+          s, n = pattern.subn('\nvoid tnc155_upd7220_service', s, count=1)
+          assert n == 1
+          p.write_text(s)
+          PY
+      - name: Commit cleanup
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Makefile.tnc155 Core/Src/tnc155_firmware.c Core/Src/tnc155_upd7220_l8.c
+          git commit -m 'Remove STM32 GDC backing and scanout path'
+          git push origin HEAD:tnc155-tinyusb-cdc
