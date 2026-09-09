@@ -43,7 +43,7 @@ extern "C" {
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
 /* LTDC timing/pixel-format entry selected from LTDCSYNC[]. */
-#define LTDC_VID_FORMAT 10U
+#define LTDC_VID_FORMAT 11U
 
 /* External SDRAM and framebuffer layout.
  *

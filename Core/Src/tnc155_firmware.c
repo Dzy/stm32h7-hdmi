@@ -17,14 +17,14 @@
 
 #define TNC155_MACHINE_ADDRESS       (SDRAM_BASE_ADDRESS + (10U * 1024U * 1024U))
 #define TNC155_VIDEO_MIN_PERIOD_MS   20U
-#define TNC155_DEBUG_PERIOD_MS       1000U
+#define TNC155_DEBUG_PERIOD_MS       200U
 #define TNC155_STEP_SLICE            4096U
 #define TNC155_HW_TICK_HZ            1000U
 #define TNC155_DEC_TICKS_PER_MS      (TNC155_MAIN_CPU_CLOCK_HZ / 16000U)
 #define TNC155_PENDING_LEVEL3        (1U << 2)
 
-#define HDMI_WIDTH  1280U
-#define HDMI_HEIGHT 720U
+#define HDMI_WIDTH  1920U
+#define HDMI_HEIGHT 1080U
 #define TNC_X0      ((HDMI_WIDTH - TNC155_VIDEO_WIDTH) / 2U)
 #define TNC_Y0_MAX  ((HDMI_HEIGHT - TNC155_VIDEO_HEIGHT) / 2U)
 
@@ -67,8 +67,8 @@ enum {
 _Static_assert((TNC155_MACHINE_ADDRESS + sizeof(tnc155_machine)) <=
                (SDRAM_BASE_ADDRESS + SDRAM_SIZE_BYTES),
                "TNC155 machine state does not fit external SDRAM");
-_Static_assert(LTDC_VID_FORMAT == 10U,
-               "TNC155 firmware currently targets the 1280x720p50 L8 mode");
+_Static_assert(LTDC_VID_FORMAT == 11U,
+               "TNC155 firmware currently targets the 1920x1080p50 L8 mode");
 _Static_assert((TNC_NATIVE_WIDTH & 1U) == 0U && (HDMI_WIDTH & 1U) == 0U &&
                (TNC_X0 & 1U) == 0U,
                "DMA2D raw L8 blit requires even width and X alignment");
@@ -492,14 +492,6 @@ static bool gdc_video_dirty(void)
     return native_frame_hash() != s_rendered_native_hash;
 }
 
-static bool ltdc_in_vertical_blank(void)
-{
-    uint32_t y = READ_REG(LTDC->CPSR) & LTDC_CPSR_CYPOS_Msk;
-
-    return y <= hltdc.Init.AccumulatedVBP ||
-           y > hltdc.Init.AccumulatedActiveH;
-}
-
 static void remember_rendered_gdc_state(void)
 {
     const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
@@ -758,7 +750,7 @@ void TNC155_Firmware_Task(void)
     debug_due = (int32_t)(now - s_next_debug_ms) >= 0;
     redraw_tnc = dirty && video_due;
 
-    if (s_swap_pending == 0u && redraw_tnc && ltdc_in_vertical_blank()) {
+    if (s_swap_pending == 0u && redraw_tnc) {
         if (present_frame(true)) {
             remember_rendered_gdc_state();
             s_next_video_ms = now + TNC155_VIDEO_MIN_PERIOD_MS;
