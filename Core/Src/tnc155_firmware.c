@@ -484,10 +484,20 @@ static bool gdc_video_dirty(void)
 
     if (gdc->display_enabled != s_rendered_display_enabled)
         return true;
-    if (gdc->words_written == s_rendered_words_written &&
-        gdc->scanout_commits == s_rendered_scanout_commits)
+    /* The direct STM32 backend changes its native surface for every WDAT
+       word.  Publish only after the command engine commits that stream;
+       otherwise a 20 ms tick can blit a partially updated screen. */
+    if (gdc->scanout_commits == s_rendered_scanout_commits)
         return false;
     return native_frame_hash() != s_rendered_native_hash;
+}
+
+static bool ltdc_in_vertical_blank(void)
+{
+    uint32_t y = READ_REG(LTDC->CPSR) & LTDC_CPSR_CYPOS_Msk;
+
+    return y <= hltdc.Init.AccumulatedVBP ||
+           y > hltdc.Init.AccumulatedActiveH;
 }
 
 static void remember_rendered_gdc_state(void)
@@ -748,7 +758,7 @@ void TNC155_Firmware_Task(void)
     debug_due = (int32_t)(now - s_next_debug_ms) >= 0;
     redraw_tnc = dirty && video_due;
 
-    if (s_swap_pending == 0u && redraw_tnc) {
+    if (s_swap_pending == 0u && redraw_tnc && ltdc_in_vertical_blank()) {
         if (present_frame(true)) {
             remember_rendered_gdc_state();
             s_next_video_ms = now + TNC155_VIDEO_MIN_PERIOD_MS;
