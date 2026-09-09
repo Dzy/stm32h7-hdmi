@@ -101,6 +101,8 @@ static uint32_t s_next_video_ms;
 static uint32_t s_next_debug_ms;
 static uint32_t s_rendered_words_written;
 static uint32_t s_rendered_scanout_commits;
+static uint32_t s_rendered_native_hash;
+static bool s_rendered_display_enabled;
 static volatile uint32_t s_pending_hw_ms;
 static volatile uint8_t s_hw_time_active;
 static volatile uint8_t s_front_fb;
@@ -464,11 +466,28 @@ static bool dma2d_copy_tnc(uint32_t source, uint32_t destination,
     return HAL_DMA2D_PollForTransfer(&hdma2d, TNC_DMA2D_TIMEOUT_MS) == HAL_OK;
 }
 
+static uint32_t native_frame_hash(void)
+{
+    uint32_t hash = 2166136261u;
+    size_t i;
+
+    for (i = 0u; i < TNC_NATIVE_BYTES; ++i) {
+        hash ^= s_native_frame[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 static bool gdc_video_dirty(void)
 {
     const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
-    return gdc->words_written != s_rendered_words_written ||
-           gdc->scanout_commits != s_rendered_scanout_commits;
+
+    if (gdc->display_enabled != s_rendered_display_enabled)
+        return true;
+    if (gdc->words_written == s_rendered_words_written &&
+        gdc->scanout_commits == s_rendered_scanout_commits)
+        return false;
+    return native_frame_hash() != s_rendered_native_hash;
 }
 
 static void remember_rendered_gdc_state(void)
@@ -476,6 +495,8 @@ static void remember_rendered_gdc_state(void)
     const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
     s_rendered_words_written = gdc->words_written;
     s_rendered_scanout_commits = gdc->scanout_commits;
+    s_rendered_native_hash = native_frame_hash();
+    s_rendered_display_enabled = gdc->display_enabled;
 }
 
 /* In STM32 firmware the TMS9995 internal decrementer is driven from the real
@@ -722,8 +743,8 @@ void TNC155_Firmware_Task(void)
         run_machine_slice();
 
     now = HAL_GetTick();
-    dirty = gdc_video_dirty();
     video_due = (int32_t)(now - s_next_video_ms) >= 0;
+    dirty = video_due && gdc_video_dirty();
     debug_due = (int32_t)(now - s_next_debug_ms) >= 0;
     redraw_tnc = dirty && video_due;
 
