@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  patch-build-commit:
+  patch-commit:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout board branch
@@ -17,12 +17,6 @@ jobs:
         with:
           ref: tnc155-tinyusb-cdc
           fetch-depth: 0
-      - name: Checkout emulator STM32 branch
-        uses: actions/checkout@v4
-        with:
-          repository: Dzy/tnc155-emulator
-          ref: stm32-portable-serial
-          path: tnc155-emulator
       - name: Integrate direct L8 GDC backend
         shell: bash
         run: |
@@ -54,10 +48,6 @@ jobs:
           s = s.replace(old, new, 1)
           p.write_text(s)
           PY
-      - name: Install ARM toolchain
-        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
-      - name: Build STM32H7 firmware
-        run: make -f Makefile.tnc155 -j2 TNC155_DIR=tnc155-emulator
       - name: Commit functional integration
         shell: bash
         run: |
