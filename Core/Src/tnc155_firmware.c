@@ -570,7 +570,6 @@ static void service_hardware_time(void)
 static void run_machine_slice(void)
 {
     uint32_t start_core_cycles = DWT->CYCCNT;
-    uint32_t initial_commits = s_machine->clp.gdc.scanout_commits;
     unsigned quanta;
 
     /* Run flat out in complete 8-instruction CPU quanta.  The machine runner
@@ -585,8 +584,6 @@ static void run_machine_slice(void)
             g_tnc155_faulted = 1u;
             break;
         }
-        if (s_machine->clp.gdc.scanout_commits != initial_commits)
-            break;
     }
 
     g_tnc155_last_slice_core_cycles = DWT->CYCCNT - start_core_cycles;
@@ -739,9 +736,7 @@ void TNC155_Firmware_Task(void)
     service_hardware_time();
     TNC155_USB_CDC_Task();
 
-    /* Do not run past an unpublished display generation.  This also keeps the
-       very first CHECK MEMORY text alive until it has reached a framebuffer. */
-    if (g_tnc155_faulted == 0u && !gdc_video_dirty())
+    if (g_tnc155_faulted == 0u)
         run_machine_slice();
 
     now = HAL_GetTick();

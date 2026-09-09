@@ -30,8 +30,8 @@
 
 #define DEFAULT_TEXT_HEIGHT         468u
 #define DEFAULT_GRAPHICS_HEIGHT     490u
-#define TEXT_CELL_COLUMNS           32u
-#define TEXT_CELL_CAPACITY          1024u
+#define TEXT_SHADOW_WORDS           0x8000u
+#define TEXT_DIRTY_CAPACITY         4096u
 
 /* The STM32 firmware contains one CLP GDC.  Binding the target surface here
    keeps the public emulator state compact conceptually: the uPD7220 command
@@ -43,12 +43,10 @@ static const uint8_t *s_atlas;
 static unsigned s_width;
 static unsigned s_height;
 static unsigned s_stride;
-static uint16_t s_text_keys[TEXT_CELL_CAPACITY];
-static uint16_t s_text_values[TEXT_CELL_CAPACITY];
-static uint8_t s_text_heights[TEXT_CELL_CAPACITY];
-static uint8_t s_text_valid[TEXT_CELL_CAPACITY / 8u];
-static uint8_t s_text_dirty[TEXT_CELL_CAPACITY / 8u];
-static uint16_t s_text_dirty_slots[TEXT_CELL_CAPACITY];
+static uint16_t s_text_shadow[TEXT_SHADOW_WORDS];
+static uint8_t s_text_valid[TEXT_SHADOW_WORDS / 8u];
+static uint8_t s_text_dirty[TEXT_SHADOW_WORDS / 8u];
+static uint16_t s_text_dirty_words[TEXT_DIRTY_CAPACITY];
 static unsigned s_text_dirty_count;
 
 typedef struct l8_partition {
@@ -336,14 +334,14 @@ static void render_graphics_word(uint16_t data, uint16_t mask, uint8_t mod,
     }
 }
 
-static bool text_bit_test(const uint8_t *bits, unsigned index)
+static bool text_bit_test(const uint8_t *bits, unsigned word)
 {
-    return (bits[index >> 3] & (uint8_t)(1u << (index & 7u))) != 0u;
+    return (bits[word >> 3] & (uint8_t)(1u << (word & 7u))) != 0u;
 }
 
-static void text_bit_set(uint8_t *bits, unsigned index)
+static void text_bit_set(uint8_t *bits, unsigned word)
 {
-    bits[index >> 3] |= (uint8_t)(1u << (index & 7u));
+    bits[word >> 3] |= (uint8_t)(1u << (word & 7u));
 }
 
 static void invalidate_text_shadow(void)
@@ -353,58 +351,31 @@ static void invalidate_text_shadow(void)
     s_text_dirty_count = 0u;
 }
 
-static unsigned find_text_slot(uint16_t key)
+static void queue_text_word(uint32_t word, uint16_t value)
 {
-    unsigned probe;
-    unsigned slot = ((unsigned)key * 40503u) & (TEXT_CELL_CAPACITY - 1u);
+    unsigned index = (unsigned)(word & 0x7fffu);
 
-    for (probe = 0u; probe < TEXT_CELL_CAPACITY; ++probe) {
-        if (!text_bit_test(s_text_valid, slot) || s_text_keys[slot] == key)
-            return slot;
-        slot = (slot + 1u) & (TEXT_CELL_CAPACITY - 1u);
-    }
-    return TEXT_CELL_CAPACITY;
-}
-
-static void queue_text_cell(uint16_t value, const l8_location *loc)
-{
-    uint16_t key = (uint16_t)(loc->y * TEXT_CELL_COLUMNS + loc->x_word);
-    unsigned slot = find_text_slot(key);
-
-    if (slot == TEXT_CELL_CAPACITY) {
-        render_text_cell(value, loc);
-        return;
-    }
-
-    if (text_bit_test(s_text_valid, slot) && s_text_values[slot] == value &&
-        s_text_heights[slot] == loc->cell_height)
+    if (text_bit_test(s_text_valid, index) &&
+        s_text_shadow[index] == value)
         return;
 
-    s_text_keys[slot] = key;
-    s_text_values[slot] = value;
-    s_text_heights[slot] = (uint8_t)loc->cell_height;
-    text_bit_set(s_text_valid, slot);
-    if (!text_bit_test(s_text_dirty, slot)) {
-        text_bit_set(s_text_dirty, slot);
-        s_text_dirty_slots[s_text_dirty_count++] = (uint16_t)slot;
+    s_text_shadow[index] = value;
+    text_bit_set(s_text_valid, index);
+    if (!text_bit_test(s_text_dirty, index) &&
+        s_text_dirty_count < TEXT_DIRTY_CAPACITY) {
+        text_bit_set(s_text_dirty, index);
+        s_text_dirty_words[s_text_dirty_count++] = (uint16_t)index;
     }
 }
 
-static void flush_text_words(void)
+static void flush_text_words(tnc155_upd7220 *gdc)
 {
     unsigned i;
 
     for (i = 0u; i < s_text_dirty_count; ++i) {
-        unsigned slot = s_text_dirty_slots[i];
-        uint16_t key = s_text_keys[slot];
-        l8_location loc = {
-            .valid = true,
-            .graphics = false,
-            .x_word = key % TEXT_CELL_COLUMNS,
-            .y = key / TEXT_CELL_COLUMNS,
-            .cell_height = s_text_heights[slot]
-        };
-        render_text_cell(s_text_values[slot], &loc);
+        unsigned word = s_text_dirty_words[i];
+        l8_location loc = locate_word(gdc, word);
+        render_text_cell(s_text_shadow[word], &loc);
     }
     memset(s_text_dirty, 0, sizeof(s_text_dirty));
     s_text_dirty_count = 0u;
@@ -436,7 +407,7 @@ static void direct_write_word(tnc155_upd7220 *gdc, uint8_t type, uint8_t mod,
         /* Buffer character traffic and render only changed cells when the
            WDAT stream commits.  The TNC repeatedly writes unchanged display
            words, which must not expand into hundreds of redundant L8 stores. */
-        queue_text_cell(data, &loc);
+        queue_text_word(gdc->cursor, data);
     }
 
     gdc->last_vram_word = gdc->cursor & 0x3ffffu;
@@ -942,7 +913,7 @@ uint8_t tnc155_upd7220_read_data(tnc155_upd7220 *gdc)
 static void process_command(tnc155_upd7220 *gdc, uint8_t command)
 {
     if ((gdc->command & 0xe4u) == 0x20u && gdc->parameter_count != 0u) {
-        flush_text_words();
+        flush_text_words(gdc);
         ++gdc->scanout_commits;
     }
     ++gdc->command_count;
