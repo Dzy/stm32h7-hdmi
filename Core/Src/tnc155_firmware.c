@@ -92,11 +92,12 @@ static uint8_t *const s_font_atlas =
     (uint8_t *)(uintptr_t)TNC_FONT_ATLAS_ADDRESS;
 static tnc155_serial_keyboard s_keyboard;
 
-/* The P1 font is expanded once at boot into a byte-per-pixel L8 mask atlas
-   in AXI SRAM.  Modes 0..2 share the canonical mode-0 glyph bank and apply
-   only their measured vertical offsets when blitted; modes 3..7 each have
-   one bank.  Per-cell inverse/bright colours are then four 32-bit mask ops
-   per row instead of ROM lookup + bit expansion on every redraw. */
+/* The P1 font is expanded once at boot directly into a byte-per-pixel L8
+   atlas in AXI SRAM using the normal phosphor CLUT indices.  Modes 0..2
+   share the canonical mode-0 glyph bank and apply only their measured
+   vertical offsets when blitted; modes 3..7 each have one bank.  Normal
+   text is therefore four aligned 32-bit copies per glyph row; inverse and
+   bright attributes are derived with word-wide arithmetic, never bitmaps. */
 static uint32_t s_graphics_byte_lut[256][2];
 
 static uint32_t s_next_video_ms;
@@ -400,10 +401,10 @@ static bool init_raster_luts(void)
                 unsigned bit;
 
                 for (bit = 0u; bit < 8u; ++bit) {
-                    uint8_t mask = (bits & (0x80u >> bit)) != 0u ?
-                                   0xffu : 0x00u;
-                    dst[bit * 2u] = mask;
-                    dst[bit * 2u + 1u] = mask;
+                    uint8_t pixel = (bits & (0x80u >> bit)) != 0u ?
+                                    TNC_L8_ON_NORMAL : TNC_L8_OFF_NORMAL;
+                    dst[bit * 2u] = pixel;
+                    dst[bit * 2u + 1u] = pixel;
                 }
             }
         }
@@ -504,34 +505,36 @@ static unsigned p1_atlas_bank(unsigned p1_mode)
     return p1_mode <= 2u ? 0u : p1_mode - 2u;
 }
 
-static void blit_atlas_row(unsigned attr, const uint32_t *mask,
+static void blit_atlas_row(unsigned attr, const uint32_t *src,
                            uint32_t *dst)
 {
-    uint32_t off;
-    uint32_t mix;
     unsigned i;
 
     switch (attr & 3u) {
     case 0u:
-        off = 0x00000000u;
-        mix = 0xdfdfdfdfu;
-        break;
+        /* Dominant path: atlas bytes already are final L8 pixels. */
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+        dst[3] = src[3];
+        return;
     case 1u:
-        off = 0xdfdfdfdfu;
-        mix = 0xdfdfdfdfu;
-        break;
+        for (i = 0u; i < 4u; ++i)
+            dst[i] = src[i] ^ 0xdfdfdfdfu;
+        return;
     case 2u:
-        off = 0x04040404u;
-        mix = 0x75757575u;
-        break;
+        for (i = 0u; i < 4u; ++i) {
+            uint32_t on = src[i] & 0x01010101u;
+            dst[i] = 0x04040404u + on * 0x6du;
+        }
+        return;
     default:
-        off = 0x71717171u;
-        mix = 0x75757575u;
-        break;
+        for (i = 0u; i < 4u; ++i) {
+            uint32_t on = src[i] & 0x01010101u;
+            dst[i] = 0x71717171u - on * 0x6du;
+        }
+        return;
     }
-
-    for (i = 0u; i < 4u; ++i)
-        dst[i] = off ^ (mask[i] & mix);
 }
 
 static uint16_t load_backing_word16(const tnc155_upd7220 *gdc, uint32_t word)
@@ -760,8 +763,6 @@ static bool render_tnc_native(void)
 
     if (!gdc->display_enabled)
         goto done;
-    if (font == NULL || font->bytes == NULL || font->size < 0x4000u)
-        return false;
     if (active_height > TNC_NATIVE_HEIGHT)
         active_height = TNC_NATIVE_HEIGHT;
 
