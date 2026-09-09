@@ -107,7 +107,6 @@ static volatile uint8_t s_hw_time_active;
 static volatile uint8_t s_front_fb;
 static volatile uint8_t s_pending_fb;
 static volatile uint8_t s_swap_pending;
-static uint8_t s_waiting_for_first_gdc_frame;
 
 volatile uint32_t g_tnc155_last_slice_core_cycles;
 volatile uint32_t g_tnc155_max_slice_core_cycles;
@@ -586,8 +585,7 @@ static void run_machine_slice(void)
             g_tnc155_faulted = 1u;
             break;
         }
-        if (s_waiting_for_first_gdc_frame != 0u &&
-            s_machine->clp.gdc.scanout_commits != initial_commits)
+        if (s_machine->clp.gdc.scanout_commits != initial_commits)
             break;
     }
 
@@ -714,12 +712,13 @@ bool TNC155_Firmware_Init(void)
     s_next_video_ms = now + TNC155_VIDEO_MIN_PERIOD_MS;
     s_next_debug_ms = now + TNC155_DEBUG_PERIOD_MS;
 
-    /* Both physical framebuffers are already clear and framebuffer 0 is the
-       active LTDC surface.  Do not queue a redundant blank page flip here:
-       it can occupy the first VBlank while the short CHECK MEMORY message is
-       produced.  Reserve the first reload for actual GDC output. */
+    /* Force the first frame to establish both the TNC image and the initial
+       GDC generation snapshot. */
+    s_rendered_words_written = UINT32_MAX;
+    s_rendered_scanout_commits = UINT32_MAX;
+    if (!present_frame(true))
+        return false;
     remember_rendered_gdc_state();
-    s_waiting_for_first_gdc_frame = 1u;
 
     /* Start physical-time accounting only after all emulated state and video
        initialization is complete.  SysTick from this point is the timing
@@ -740,8 +739,9 @@ void TNC155_Firmware_Task(void)
     service_hardware_time();
     TNC155_USB_CDC_Task();
 
-    if (g_tnc155_faulted == 0u &&
-        !(s_waiting_for_first_gdc_frame != 0u && gdc_video_dirty()))
+    /* Do not run past an unpublished display generation.  This also keeps the
+       very first CHECK MEMORY text alive until it has reached a framebuffer. */
+    if (g_tnc155_faulted == 0u && !gdc_video_dirty())
         run_machine_slice();
 
     now = HAL_GetTick();
@@ -753,7 +753,6 @@ void TNC155_Firmware_Task(void)
     if (s_swap_pending == 0u && redraw_tnc) {
         if (present_frame(true)) {
             remember_rendered_gdc_state();
-            s_waiting_for_first_gdc_frame = 0u;
             s_next_video_ms = now + TNC155_VIDEO_MIN_PERIOD_MS;
             s_next_debug_ms = now + TNC155_DEBUG_PERIOD_MS;
         }
