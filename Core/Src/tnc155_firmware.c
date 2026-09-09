@@ -99,7 +99,6 @@ static tnc155_serial_keyboard s_keyboard;
 
 static uint32_t s_next_video_ms;
 static uint32_t s_next_debug_ms;
-static uint32_t s_rendered_fifo_entries;
 static uint32_t s_rendered_words_written;
 static uint32_t s_rendered_scanout_commits;
 static volatile uint32_t s_pending_hw_ms;
@@ -468,15 +467,13 @@ static bool dma2d_copy_tnc(uint32_t source, uint32_t destination,
 static bool gdc_video_dirty(void)
 {
     const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
-    return gdc->fifo_entries_processed != s_rendered_fifo_entries ||
-           gdc->words_written != s_rendered_words_written ||
+    return gdc->words_written != s_rendered_words_written ||
            gdc->scanout_commits != s_rendered_scanout_commits;
 }
 
 static void remember_rendered_gdc_state(void)
 {
     const tnc155_upd7220 *gdc = &s_machine->clp.gdc;
-    s_rendered_fifo_entries = gdc->fifo_entries_processed;
     s_rendered_words_written = gdc->words_written;
     s_rendered_scanout_commits = gdc->scanout_commits;
 }
@@ -696,7 +693,6 @@ bool TNC155_Firmware_Init(void)
 
     /* Force the first frame to establish both the TNC image and the initial
        GDC generation snapshot. */
-    s_rendered_fifo_entries = UINT32_MAX;
     s_rendered_words_written = UINT32_MAX;
     s_rendered_scanout_commits = UINT32_MAX;
     if (!present_frame(true))
