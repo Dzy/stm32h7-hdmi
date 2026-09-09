@@ -49,9 +49,8 @@
 
 #define DEBUG_X       12U
 #define DEBUG_Y       12U
-#define DEBUG_W       620U
-#define DEBUG_H       196U
 #define DEBUG_SCALE   2U
+#define DEBUG_COLUMNS 51U
 #define DEBUG_FG      0xffU
 #define DEBUG_BG      0x00U
 
@@ -204,15 +203,6 @@ static void debug_draw_char(uint8_t *dst, unsigned x0, unsigned y0, char c)
     }
 }
 
-static void debug_draw_text(uint8_t *dst, unsigned x, unsigned y,
-                            const char *text)
-{
-    while (*text != '\0') {
-        debug_draw_char(dst, x, y, *text++);
-        x += 6u * DEBUG_SCALE;
-    }
-}
-
 static char *debug_append_text(char *p, const char *text)
 {
     while (*text != '\0')
@@ -257,8 +247,18 @@ static char *debug_append_u32(char *p, uint32_t value)
 
 static void debug_draw_line(uint8_t *dst, unsigned line, const char *text)
 {
-    debug_draw_text(dst, DEBUG_X + 6u,
-                    DEBUG_Y + 5u + line * (8u * DEBUG_SCALE), text);
+    unsigned column;
+    unsigned x = DEBUG_X + 6u;
+    unsigned y = DEBUG_Y + 5u + line * (8u * DEBUG_SCALE);
+
+    /* Each glyph paints both foreground and background pixels.  Pad the rest
+       of the row with spaces so shorter values erase their old tail without
+       clearing and flashing the entire diagnostics rectangle. */
+    for (column = 0u; column < DEBUG_COLUMNS; ++column) {
+        char c = *text != '\0' ? *text++ : ' ';
+        debug_draw_char(dst, x, y, c);
+        x += 6u * DEBUG_SCALE;
+    }
 }
 
 static void draw_debug_overlay(uint8_t *dst)
@@ -266,11 +266,6 @@ static void draw_debug_overlay(uint8_t *dst)
     char line[64];
     char *p;
     uint32_t now_ms = HAL_GetTick();
-    unsigned y;
-
-    for (y = DEBUG_Y; y < DEBUG_Y + DEBUG_H; ++y)
-        memset(dst + (size_t)y * HDMI_WIDTH + DEBUG_X,
-               DEBUG_BG, DEBUG_W);
 
     debug_draw_line(dst, 0u, "TNC155 STM32 DEBUG");
 
