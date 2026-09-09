@@ -1012,19 +1012,6 @@ void tnc155_upd7220_write_parameter(tnc155_upd7220 *gdc, uint8_t value)
     (void)fifo_push(gdc, value, GDC_FIFO_TAG_PARAMETER);
 }
 
-/* Kept only for ABI/source compatibility with the desktop core header.  The
-   STM32 build deliberately does not use the old backing/scanout callback
-   path; bind_l8() is the native rendering interface. */
-void tnc155_upd7220_set_native_video_callbacks(
-    tnc155_upd7220 *gdc, tnc155_upd7220_native_word_cb word_cb,
-    tnc155_upd7220_native_invalidate_cb invalidate_cb, void *opaque)
-{
-    (void)gdc;
-    (void)word_cb;
-    (void)invalidate_cb;
-    (void)opaque;
-}
-
 void tnc155_upd7220_service(tnc155_upd7220 *gdc, unsigned max_entries)
 {
     uint8_t data;

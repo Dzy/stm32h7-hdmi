@@ -106,7 +106,6 @@ src/main/main_mapper.c \
 src/main/mainboard.c \
 src/clp/clp_board.c \
 src/machine/machine.c \
-src/clp/video.c \
 src/frontend/serial_keyboard_protocol.c
 
 PREFIX = arm-none-eabi-
