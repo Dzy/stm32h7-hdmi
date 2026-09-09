@@ -309,10 +309,14 @@ static void draw_debug_overlay(uint8_t *dst)
     *p = '\0';
     debug_draw_line(dst, 5u, line);
 
-    p = debug_append_text(line, "UNMAP=");
-    p = debug_append_hex32(p, (uint32_t)s_keyboard.unmapped_messages);
-    p = debug_append_text(p, " DUP=");
-    p = debug_append_hex32(p, (uint32_t)s_keyboard.duplicate_key_downs);
+    p = debug_append_text(line, "FIFO=");
+    p = debug_append_u32(p, s_machine->main.keyboard.fifo_count);
+    p = debug_append_text(p, " PUSH=");
+    p = debug_append_u32(p, s_machine->main.keyboard.keys_accepted);
+    p = debug_append_text(p, " READ=");
+    p = debug_append_u32(p, s_machine->main.keyboard.keys_read);
+    p = debug_append_text(p, " LAST=");
+    p = debug_append_hex16(p, s_machine->main.keyboard.last_key_read);
     *p = '\0';
     debug_draw_line(dst, 6u, line);
 
