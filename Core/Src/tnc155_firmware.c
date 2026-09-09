@@ -920,13 +920,9 @@ static bool present_frame(bool redraw_tnc)
     dst = (uint8_t *)(uintptr_t)framebuffer_address(back_fb);
 
     if (redraw_tnc) {
-        if (s_native_full_redraw != 0u && !render_tnc_native()) {
-            g_tnc155_faulted = 1u;
-            return false;
-        }
-        /* Normal text/graphics writes have already updated the AXI L8 image
-           incrementally.  Publish its dirty cache lines to DMA2D once per
-           presented frame; mapping/mode changes take the full rebuild above. */
+        /* The STM32 uPD7220 backend now executes WDAT/FIGD/GCHRD and text
+           glyph blits directly into this native L8 framebuffer.  There is
+           no GDC backing-store rebuild or scanout stage in the runtime path. */
         SCB_CleanDCache_by_Addr((uint32_t *)(void *)s_native_frame,
                                 (int32_t)TNC_NATIVE_BYTES);
         __DSB();
@@ -991,10 +987,13 @@ bool TNC155_Firmware_Init(void)
 
     if (!tnc155_machine_init(s_machine))
         return false;
-    s_native_full_redraw = 1u;
-    tnc155_upd7220_set_native_video_callbacks(
-        &s_machine->clp.gdc, native_l8_word_written,
-        native_l8_invalidate, NULL);
+    s_native_full_redraw = 0u;
+    tnc155_upd7220_bind_l8(&s_machine->clp.gdc,
+                           s_native_frame,
+                           TNC_NATIVE_WIDTH,
+                           TNC_NATIVE_HEIGHT,
+                           TNC_NATIVE_WIDTH,
+                           s_font_atlas);
 
     if (tnc155_default_user_ram_size != sizeof(s_machine->main.user_ram))
         return false;
