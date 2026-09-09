@@ -1,0 +1,47 @@
+name: one-shot use TNC155 quantum runner
+
+on:
+  push:
+    branches:
+      - tnc155-tinyusb-cdc
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tnc155-tinyusb-cdc
+          fetch-depth: 0
+      - name: Switch firmware slice to quantum runner
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Core/Src/tnc155_firmware.c')
+          s = p.read_text()
+
+          old_assert = '''_Static_assert((TNC155_MAIN_CPU_CLOCK_HZ % 16000U) == 0U,\n               "1 ms hardware tick must map exactly to TMS9995 decrementer ticks");'''
+          new_assert = old_assert + '''\n_Static_assert((TNC155_STEP_SLICE % TNC155_CPU_QUANTUM) == 0U,\n               "firmware slice must contain complete CPU quanta");'''
+          assert s.count(old_assert) == 1
+          s = s.replace(old_assert, new_assert, 1)
+
+          old = '''static void run_machine_slice(void)\n{\n    uint32_t start_core_cycles = DWT->CYCCNT;\n    unsigned steps;\n\n    /* Run flat out.  tnc155_machine_step() provides a fixed MAIN/CLP\n       instruction interleave in TNC155_FIRMWARE builds; no guest-cycle\n       comparison, catch-up target or 12 MHz software throttling remains in\n       this hot loop. */\n    for (steps = 0u; steps < TNC155_STEP_SLICE; ++steps) {\n        tms9995_step_result result = tnc155_machine_step(s_machine, NULL);\n        if (result != TMS9995_STEP_OK && result != TMS9995_STEP_IDLE) {\n            g_tnc155_faulted = 1u;\n            break;\n        }\n    }\n\n    g_tnc155_last_slice_core_cycles = DWT->CYCCNT - start_core_cycles;\n    if (g_tnc155_last_slice_core_cycles > g_tnc155_max_slice_core_cycles)\n        g_tnc155_max_slice_core_cycles = g_tnc155_last_slice_core_cycles;\n}'''
+          new = '''static void run_machine_slice(void)\n{\n    uint32_t start_core_cycles = DWT->CYCCNT;\n    unsigned quanta;\n\n    /* Run flat out in complete 8-instruction CPU quanta.  The machine runner\n       now keeps MAIN or CLP selected for the whole quantum and handles Q67\n       HOLD/idle donation internally at instruction boundaries, removing the\n       per-instruction scheduler re-entry from this foreground hot loop. */\n    for (quanta = 0u;\n         quanta < (TNC155_STEP_SLICE / TNC155_CPU_QUANTUM);\n         ++quanta) {\n        tms9995_step_result result = tnc155_machine_run_quantum(s_machine);\n        if (result != TMS9995_STEP_OK && result != TMS9995_STEP_IDLE) {\n            g_tnc155_faulted = 1u;\n            break;\n        }\n    }\n\n    g_tnc155_last_slice_core_cycles = DWT->CYCCNT - start_core_cycles;\n    if (g_tnc155_last_slice_core_cycles > g_tnc155_max_slice_core_cycles)\n        g_tnc155_max_slice_core_cycles = g_tnc155_last_slice_core_cycles;\n}'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          git diff --check
+      - name: Commit result
+        shell: bash
+        run: |
+          git rm .github/workflows/one-shot-use-quantum-runner.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Core/Src/tnc155_firmware.c
+          git commit -m "Run TNC155 firmware with true CPU quanta"
+          git push origin HEAD:tnc155-tinyusb-cdc
