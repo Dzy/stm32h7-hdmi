@@ -23,8 +23,8 @@
 #define TNC155_DEC_TICKS_PER_MS      (TNC155_MAIN_CPU_CLOCK_HZ / 16000U)
 #define TNC155_PENDING_LEVEL3        (1U << 2)
 
-#define HDMI_WIDTH  1920U
-#define HDMI_HEIGHT 1080U
+#define HDMI_WIDTH  1280U
+#define HDMI_HEIGHT 720U
 #define TNC_X0      ((HDMI_WIDTH - TNC155_VIDEO_WIDTH) / 2U)
 #define TNC_Y0_MAX  ((HDMI_HEIGHT - TNC155_VIDEO_HEIGHT) / 2U)
 
@@ -67,8 +67,8 @@ enum {
 _Static_assert((TNC155_MACHINE_ADDRESS + sizeof(tnc155_machine)) <=
                (SDRAM_BASE_ADDRESS + SDRAM_SIZE_BYTES),
                "TNC155 machine state does not fit external SDRAM");
-_Static_assert(LTDC_VID_FORMAT == 11U,
-               "TNC155 firmware currently targets the 1920x1080p50 L8 mode");
+_Static_assert(LTDC_VID_FORMAT == 10U,
+               "TNC155 firmware currently targets the 1280x720p50 L8 mode");
 _Static_assert((TNC_NATIVE_WIDTH & 1U) == 0U && (HDMI_WIDTH & 1U) == 0U &&
                (TNC_X0 & 1U) == 0U,
                "DMA2D raw L8 blit requires even width and X alignment");
