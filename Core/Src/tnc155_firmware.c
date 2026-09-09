@@ -67,8 +67,8 @@ enum {
 _Static_assert((TNC155_MACHINE_ADDRESS + sizeof(tnc155_machine)) <=
                (SDRAM_BASE_ADDRESS + SDRAM_SIZE_BYTES),
                "TNC155 machine state does not fit external SDRAM");
-_Static_assert(LTDC_VID_FORMAT == 8U,
-               "TNC155 firmware currently targets the 1920x1080p60 L8 mode");
+_Static_assert(LTDC_VID_FORMAT == 11U,
+               "TNC155 firmware currently targets the 1920x1080p50 L8 mode");
 _Static_assert((TNC_NATIVE_WIDTH & 1U) == 0U && (HDMI_WIDTH & 1U) == 0U &&
                (TNC_X0 & 1U) == 0U,
                "DMA2D raw L8 blit requires even width and X alignment");
