@@ -79,6 +79,8 @@ _Static_assert((TNC_FONT_ATLAS_ADDRESS + TNC_FONT_ATLAS_BYTES) <=
                "TNC155 native L8 image plus font atlas do not fit AXI SRAM");
 _Static_assert((TNC155_MAIN_CPU_CLOCK_HZ % 16000U) == 0U,
                "1 ms hardware tick must map exactly to TMS9995 decrementer ticks");
+_Static_assert((TNC155_STEP_SLICE % TNC155_CPU_QUANTUM) == 0U,
+               "firmware slice must contain complete CPU quanta");
 
 static tnc155_machine *const s_machine =
     (tnc155_machine *)(uintptr_t)TNC155_MACHINE_ADDRESS;
@@ -532,13 +534,16 @@ static void service_hardware_time(void)
 static void run_machine_slice(void)
 {
     uint32_t start_core_cycles = DWT->CYCCNT;
-    unsigned steps;
+    unsigned quanta;
 
-    /* Preserve the instruction-slot scheduler used by the known-good STM32
-       build.  The quantum runner newly services a pending MAIN MID trap at a
-       deferred boundary, which the ROM reports as PROCESSOR CHECK ERROR I. */
-    for (steps = 0u; steps < TNC155_STEP_SLICE; ++steps) {
-        tms9995_step_result result = tnc155_machine_step(s_machine, NULL);
+    /* Run flat out in complete 8-instruction CPU quanta.  The machine runner
+       now keeps MAIN or CLP selected for the whole quantum and handles Q67
+       HOLD/idle donation internally at instruction boundaries, removing the
+       per-instruction scheduler re-entry from this foreground hot loop. */
+    for (quanta = 0u;
+         quanta < (TNC155_STEP_SLICE / TNC155_CPU_QUANTUM);
+         ++quanta) {
+        tms9995_step_result result = tnc155_machine_run_quantum(s_machine);
         if (result != TMS9995_STEP_OK && result != TMS9995_STEP_IDLE) {
             g_tnc155_faulted = 1u;
             break;
