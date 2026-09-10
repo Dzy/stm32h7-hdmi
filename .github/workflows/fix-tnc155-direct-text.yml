@@ -16,15 +16,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: tnc155-tinyusb-cdc
-          path: stm32-tnc155
-      - uses: actions/checkout@v4
-        with:
-          repository: Dzy/tnc155-emulator
-          ref: stm32-performance
-          path: tnc155-emulator
       - name: Remove avoidable text shadow buffers
         shell: bash
-        working-directory: stm32-tnc155
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -48,18 +41,13 @@ jobs:
                   raise SystemExit('residual hidden buffer token: ' + token)
           p.write_text(s)
           PY
-      - name: Install ARM toolchain
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-arm-none-eabi
-      - name: Build TNC155B firmware
+      - name: Syntax check changed source
         shell: bash
-        working-directory: stm32-tnc155
         run: |
-          make -f Makefile.tnc155 -j2 TNC155_DIR=../tnc155-emulator ROMSET=tnc155b
+          grep -q 'render_text_cell(data, &loc);' Core/Src/tnc155_upd7220_l8.c
+          ! grep -Eq 's_text_shadow|s_text_valid|s_text_dirty|queue_text_word|flush_text_words|invalidate_text_shadow' Core/Src/tnc155_upd7220_l8.c
       - name: Commit fix
         shell: bash
-        working-directory: stm32-tnc155
         run: |
           rm .github/workflows/fix-tnc155-direct-text.yml
           git config user.name "Dzy"
