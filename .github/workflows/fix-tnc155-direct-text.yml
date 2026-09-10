@@ -28,25 +28,24 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p=Path('Core/Src/tnc155_upd7220_l8.c')
-          s=p.read_text()
-          s=s.replace('#define TEXT_SHADOW_WORDS           0x8000u\n#define TEXT_DIRTY_CAPACITY         4096u\n','')
-          for block in [
-'''static uint16_t s_text_shadow[TEXT_SHADOW_WORDS];\nstatic uint8_t s_text_valid[TEXT_SHADOW_WORDS / 8u];\nstatic uint8_t s_text_dirty[TEXT_SHADOW_WORDS / 8u];\nstatic uint16_t s_text_dirty_words[TEXT_DIRTY_CAPACITY];\nstatic unsigned s_text_dirty_count;\n''',
-'''static bool text_bit_test(const uint8_t *bits, unsigned word)\n{\n    return (bits[word >> 3] & (uint8_t)(1u << (word & 7u))) != 0u;\n}\n\nstatic void text_bit_set(uint8_t *bits, unsigned word)\n{\n    bits[word >> 3] |= (uint8_t)(1u << (word & 7u));\n}\n\nstatic void invalidate_text_shadow(void)\n{\n    memset(s_text_valid, 0, sizeof(s_text_valid));\n    memset(s_text_dirty, 0, sizeof(s_text_dirty));\n    s_text_dirty_count = 0u;\n}\n\nstatic void queue_text_word(uint32_t word, uint16_t value)\n{\n    unsigned index = (unsigned)(word & 0x7fffu);\n\n    if (text_bit_test(s_text_valid, index) &&\n        s_text_shadow[index] == value)\n        return;\n\n    s_text_shadow[index] = value;\n    text_bit_set(s_text_valid, index);\n    if (!text_bit_test(s_text_dirty, index) &&\n        s_text_dirty_count < TEXT_DIRTY_CAPACITY) {\n        text_bit_set(s_text_dirty, index);\n        s_text_dirty_words[s_text_dirty_count++] = (uint16_t)index;\n    }\n}\n\nstatic void flush_text_words(tnc155_upd7220 *gdc)\n{\n    unsigned i;\n\n    for (i = 0u; i < s_text_dirty_count; ++i) {\n        unsigned word = s_text_dirty_words[i];\n        l8_location loc = locate_word(gdc, word);\n        render_text_cell(s_text_shadow[word], &loc);\n    }\n    memset(s_text_dirty, 0, sizeof(s_text_dirty));\n    s_text_dirty_count = 0u;\n}\n\n''']:
-              if block not in s:
-                  raise SystemExit('expected shadow block not found')
-              s=s.replace(block,'',1)
-          old='''    } else if (loc.valid && type == 0u && effective_mask == 0xffffu &&\n               (mod & 3u) == 0u) {\n        /* Buffer character traffic and render only changed cells when the\n           WDAT stream commits.  The TNC repeatedly writes unchanged display\n           words, which must not expand into hundreds of redundant L8 stores. */\n        queue_text_word(gdc->cursor, data);\n    }\n'''
-          new='''    } else if (loc.valid && type == 0u && effective_mask == 0xffffu &&\n               (mod & 3u) == 0u) {\n        /* Character WDAT is visible immediately.  Do not hide early boot\n           writes in a private shadow/dirty queue: the native L8 surface is\n           the single visible representation used by the STM32 backend. */\n        render_text_cell(data, &loc);\n    }\n'''
-          if old not in s: raise SystemExit('direct_write_word pattern not found')
-          s=s.replace(old,new,1)
-          s=s.replace('    invalidate_text_shadow();\n','')
-          s=s.replace('        flush_text_words(gdc);\n        ++gdc->scanout_commits;','        ++gdc->scanout_commits;')
-          # Ensure no hidden text buffering survives.
+          import re
+          p = Path('Core/Src/tnc155_upd7220_l8.c')
+          s = p.read_text()
+          s = s.replace('#define TEXT_SHADOW_WORDS           0x8000u\n#define TEXT_DIRTY_CAPACITY         4096u\n', '')
+          s = re.sub(r'static uint16_t s_text_shadow\[TEXT_SHADOW_WORDS\];\nstatic uint8_t s_text_valid\[TEXT_SHADOW_WORDS / 8u\];\nstatic uint8_t s_text_dirty\[TEXT_SHADOW_WORDS / 8u\];\nstatic uint16_t s_text_dirty_words\[TEXT_DIRTY_CAPACITY\];\nstatic unsigned s_text_dirty_count;\n', '', s, count=1)
+          s, n = re.subn(r'static bool text_bit_test\(.*?\n}\n\nstatic void flush_text_words\(tnc155_upd7220 \*gdc\)\n\{.*?\n}\n\n', '', s, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit('text shadow helper block not found')
+          old = "    } else if (loc.valid && type == 0u && effective_mask == 0xffffu &&\n               (mod & 3u) == 0u) {\n        /* Buffer character traffic and render only changed cells when the\n           WDAT stream commits.  The TNC repeatedly writes unchanged display\n           words, which must not expand into hundreds of redundant L8 stores. */\n        queue_text_word(gdc->cursor, data);\n    }\n"
+          new = "    } else if (loc.valid && type == 0u && effective_mask == 0xffffu &&\n               (mod & 3u) == 0u) {\n        /* Character WDAT is visible immediately. There is no private text\n           shadow or dirty queue in the STM32 backend. */\n        render_text_cell(data, &loc);\n    }\n"
+          if old not in s:
+              raise SystemExit('direct_write_word pattern not found')
+          s = s.replace(old, new, 1)
+          s = s.replace('    invalidate_text_shadow();\n', '')
+          s = s.replace('        flush_text_words(gdc);\n        ++gdc->scanout_commits;', '        ++gdc->scanout_commits;')
           for token in ('s_text_shadow','s_text_valid','s_text_dirty','queue_text_word','flush_text_words','invalidate_text_shadow','TEXT_SHADOW_WORDS','TEXT_DIRTY_CAPACITY'):
               if token in s:
-                  raise SystemExit(f'residual hidden buffer token: {token}')
+                  raise SystemExit('residual hidden buffer token: ' + token)
           p.write_text(s)
           PY
       - name: Install ARM toolchain
