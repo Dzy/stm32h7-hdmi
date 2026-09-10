@@ -1,10 +1,6 @@
-name: Convert TNC155 DMA copies to CPU
+name: TNC155 CPU copy conversion
 
-on:
-  push:
-    branches: [tnc155-tinyusb-cdc]
-    paths: [.github/workflows/tnc155-cpu-copy.yml]
-  workflow_dispatch:
+on: [push]
 
 permissions:
   contents: write
@@ -14,74 +10,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: tnc155-tinyusb-cdc
-
-      - name: Replace DMA2D TNC copies with CPU copies
+      - name: Convert TNC155 presentation copies to CPU
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
           p = Path('Core/Src/tnc155_firmware.c')
           s = p.read_text()
-
           s = s.replace('#include "dma2d.h"\n', '')
-
-          s = s.replace('''#define TNC_DMA2D_WIDTH         (TNC_NATIVE_WIDTH / 2U)\n#define TNC_DMA2D_FB_STRIDE     (HDMI_WIDTH / 2U)\n#define TNC_DMA2D_LINE_OFFSET   (TNC_DMA2D_FB_STRIDE - TNC_DMA2D_WIDTH)\n#define TNC_DMA2D_TIMEOUT_MS    10U\n''', '')
-
-          s = s.replace('''_Static_assert((TNC_NATIVE_WIDTH & 1U) == 0U && (HDMI_WIDTH & 1U) == 0U &&\n               (TNC_X0 & 1U) == 0U,\n               "DMA2D raw L8 blit requires even width and X alignment");\n''', '')
-
+          s = s.replace('#define TNC_DMA2D_WIDTH         (TNC_NATIVE_WIDTH / 2U)\n#define TNC_DMA2D_FB_STRIDE     (HDMI_WIDTH / 2U)\n#define TNC_DMA2D_LINE_OFFSET   (TNC_DMA2D_FB_STRIDE - TNC_DMA2D_WIDTH)\n#define TNC_DMA2D_TIMEOUT_MS    10U\n', '')
+          s = s.replace('_Static_assert((TNC_NATIVE_WIDTH & 1U) == 0U && (HDMI_WIDTH & 1U) == 0U &&\n               (TNC_X0 & 1U) == 0U,\n               "DMA2D raw L8 blit requires even width and X alignment");\n', '')
           start = s.index('static bool configure_dma2d_raw_l8(void)')
           end = s.index('\nstatic uint32_t native_frame_hash(void)', start)
-          replacement = r'''static void cpu_copy_tnc(uint32_t source, uint32_t destination,
-                         bool source_is_fullhd)
-{
-    const uint8_t *src = (const uint8_t *)(uintptr_t)source;
-    uint8_t *dst = (uint8_t *)(uintptr_t)destination;
-    size_t src_stride = source_is_fullhd ? HDMI_WIDTH : TNC_NATIVE_WIDTH;
-    unsigned y;
-
-    /* The TNC surface is L8 in both source and destination.  Copy exactly the
-       visible 512-byte row with the Cortex-M7 CPU; no DMA2D state, polling or
-       bus-master transfer is involved in the uPD7220 presentation path. */
-    for (y = 0u; y < TNC_NATIVE_HEIGHT; ++y)
-        memcpy(dst + (size_t)y * HDMI_WIDTH,
-               src + (size_t)y * src_stride,
-               TNC_NATIVE_WIDTH);
-    __DSB();
-}
-'''
+          replacement = '''static void cpu_copy_tnc(uint32_t source, uint32_t destination,\n                         bool source_is_fullhd)\n{\n    const uint8_t *src = (const uint8_t *)(uintptr_t)source;\n    uint8_t *dst = (uint8_t *)(uintptr_t)destination;\n    size_t src_stride = source_is_fullhd ? HDMI_WIDTH : TNC_NATIVE_WIDTH;\n    unsigned y;\n\n    for (y = 0u; y < TNC_NATIVE_HEIGHT; ++y)\n        memcpy(dst + (size_t)y * HDMI_WIDTH,\n               src + (size_t)y * src_stride,\n               TNC_NATIVE_WIDTH);\n    __DSB();\n}\n'''
           s = s[:start] + replacement + s[end:]
-
-          s = s.replace('''    bool dma_ok;\n''', '')
-          s = s.replace('''            dma_ok = dma2d_copy_tnc(TNC_NATIVE_ADDRESS,\n                                    framebuffer_tnc_address(back_fb), false);\n''', '''            cpu_copy_tnc(TNC_NATIVE_ADDRESS,\n                         framebuffer_tnc_address(back_fb), false);\n''')
-          s = s.replace('''            dma_ok = true;\n''', '')
-          s = s.replace('''        dma_ok = dma2d_copy_tnc(framebuffer_tnc_address(s_front_fb),\n                                framebuffer_tnc_address(back_fb), true);\n''', '''        cpu_copy_tnc(framebuffer_tnc_address(s_front_fb),\n                     framebuffer_tnc_address(back_fb), true);\n''')
-          s = s.replace('''    if (!dma_ok) {\n        g_tnc155_faulted = 1u;\n        return false;\n    }\n\n''', '')
-
-          s = s.replace('''    if (!configure_dma2d_raw_l8())\n        return false;\n\n''', '')
-
-          for token in ('configure_dma2d_raw_l8', 'dma2d_copy_tnc', 'HAL_DMA2D_', 'hdma2d', 'TNC_DMA2D_'):
+          s = s.replace('    bool dma_ok;\n', '')
+          s = s.replace('            dma_ok = dma2d_copy_tnc(TNC_NATIVE_ADDRESS,\n                                    framebuffer_tnc_address(back_fb), false);\n', '            cpu_copy_tnc(TNC_NATIVE_ADDRESS,\n                         framebuffer_tnc_address(back_fb), false);\n')
+          s = s.replace('            dma_ok = true;\n', '')
+          s = s.replace('        dma_ok = dma2d_copy_tnc(framebuffer_tnc_address(s_front_fb),\n                                framebuffer_tnc_address(back_fb), true);\n', '        cpu_copy_tnc(framebuffer_tnc_address(s_front_fb),\n                     framebuffer_tnc_address(back_fb), true);\n')
+          s = s.replace('    if (!dma_ok) {\n        g_tnc155_faulted = 1u;\n        return false;\n    }\n\n', '')
+          s = s.replace('    if (!configure_dma2d_raw_l8())\n        return false;\n', '')
+          s = s.replace('avoids a DMA2D burst competing with LTDC scanout.', 'avoids an extra full TNC-window CPU copy.')
+          for token in ('configure_dma2d_raw_l8','dma2d_copy_tnc','HAL_DMA2D_','hdma2d','TNC_DMA2D_'):
               if token in s:
-                  raise SystemExit(f'residual DMA2D token in TNC155 firmware: {token}')
-
+                  raise SystemExit('residual token: ' + token)
           p.write_text(s)
           PY
-
-      - name: Verify conversion
-        shell: bash
-        run: |
           grep -q 'static void cpu_copy_tnc' Core/Src/tnc155_firmware.c
-          grep -q 'cpu_copy_tnc(TNC_NATIVE_ADDRESS' Core/Src/tnc155_firmware.c
-          grep -q 'cpu_copy_tnc(framebuffer_tnc_address(s_front_fb)' Core/Src/tnc155_firmware.c
-          ! grep -q 'DMA2D\|dma2d\|hdma2d' Core/Src/tnc155_firmware.c
-
-      - name: Commit conversion
+          ! grep -q 'dma2d\|DMA2D\|hdma2d' Core/Src/tnc155_firmware.c
+      - name: Commit
         shell: bash
         run: |
           rm .github/workflows/tnc155-cpu-copy.yml
-          git config user.name "Dzy"
-          git config user.email "3352717+Dzy@users.noreply.github.com"
+          git config user.name Dzy
+          git config user.email 3352717+Dzy@users.noreply.github.com
           git add Core/Src/tnc155_firmware.c .github/workflows/tnc155-cpu-copy.yml
-          git commit -m "Use CPU copies for TNC155 video"
+          git commit -m 'Use CPU copies for TNC155 video'
           git push origin HEAD:tnc155-tinyusb-cdc
