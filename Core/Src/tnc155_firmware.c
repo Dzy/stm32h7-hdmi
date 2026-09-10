@@ -1,6 +1,5 @@
 #include "tnc155_firmware.h"
 
-#include "dma2d.h"
 #include "ltdc.h"
 #include "main.h"
 #include "tnc155/machine.h"
@@ -42,10 +41,6 @@
                                  TNC_FONT_ATLAS_ROW_BYTES)
 #define TNC_FONT_ATLAS_ADDRESS  (TNC_NATIVE_ADDRESS + \
                                  ((TNC_NATIVE_BYTES + 31U) & ~(size_t)31U))
-#define TNC_DMA2D_WIDTH         (TNC_NATIVE_WIDTH / 2U)
-#define TNC_DMA2D_FB_STRIDE     (HDMI_WIDTH / 2U)
-#define TNC_DMA2D_LINE_OFFSET   (TNC_DMA2D_FB_STRIDE - TNC_DMA2D_WIDTH)
-#define TNC_DMA2D_TIMEOUT_MS    10U
 
 #define DEBUG_X       12U
 #define DEBUG_Y       12U
@@ -68,9 +63,6 @@ _Static_assert((TNC155_MACHINE_ADDRESS + sizeof(tnc155_machine)) <=
                "TNC155 machine state does not fit external SDRAM");
 _Static_assert(LTDC_VID_FORMAT == 11U,
                "TNC155 firmware currently targets the 1920x1080p50 L8 mode");
-_Static_assert((TNC_NATIVE_WIDTH & 1U) == 0U && (HDMI_WIDTH & 1U) == 0U &&
-               (TNC_X0 & 1U) == 0U,
-               "DMA2D raw L8 blit requires even width and X alignment");
 _Static_assert(TNC_NATIVE_BYTES <= (512U * 1024U),
                "TNC155 native staging image does not fit AXI SRAM");
 _Static_assert((TNC_FONT_ATLAS_ADDRESS + TNC_FONT_ATLAS_BYTES) <=
@@ -425,40 +417,19 @@ static bool init_raster_luts(void)
     return true;
 }
 
-static bool configure_dma2d_raw_l8(void)
+static void cpu_copy_tnc(uint32_t source, uint32_t destination,
+                         bool source_is_fullhd)
 {
-    hdma2d.Init.Mode = DMA2D_M2M;
-    hdma2d.Init.ColorMode = DMA2D_OUTPUT_RGB565;
-    hdma2d.Init.OutputOffset = TNC_DMA2D_LINE_OFFSET;
-    hdma2d.Init.AlphaInverted = DMA2D_REGULAR_ALPHA;
-    hdma2d.Init.RedBlueSwap = DMA2D_RB_REGULAR;
-    hdma2d.Init.BytesSwap = DMA2D_BYTES_REGULAR;
-    hdma2d.Init.LineOffsetMode = DMA2D_LOM_PIXELS;
-    hdma2d.LayerCfg[1].InputOffset = 0u;
-    hdma2d.LayerCfg[1].InputColorMode = DMA2D_INPUT_RGB565;
-    hdma2d.LayerCfg[1].AlphaMode = DMA2D_NO_MODIF_ALPHA;
-    hdma2d.LayerCfg[1].InputAlpha = 0xffu;
-    hdma2d.LayerCfg[1].AlphaInverted = DMA2D_REGULAR_ALPHA;
-    hdma2d.LayerCfg[1].RedBlueSwap = DMA2D_RB_REGULAR;
-    hdma2d.LayerCfg[1].ChromaSubSampling = DMA2D_NO_CSS;
+    const uint8_t *src = (const uint8_t *)(uintptr_t)source;
+    uint8_t *dst = (uint8_t *)(uintptr_t)destination;
+    size_t src_stride = source_is_fullhd ? HDMI_WIDTH : TNC_NATIVE_WIDTH;
+    unsigned y;
 
-    return HAL_DMA2D_Init(&hdma2d) == HAL_OK &&
-           HAL_DMA2D_ConfigLayer(&hdma2d, 1u) == HAL_OK;
-}
-
-static bool dma2d_copy_tnc(uint32_t source, uint32_t destination,
-                           bool source_is_fullhd)
-{
-    /* RGB565 is deliberately only a 16-bit transport unit here. The two
-       bytes of each DMA2D pixel are two adjacent L8 pixels, and because input
-       and output formats are identical M2M performs no conversion. */
-    WRITE_REG(hdma2d.Instance->FGOR,
-              source_is_fullhd ? TNC_DMA2D_LINE_OFFSET : 0u);
-
-    if (HAL_DMA2D_Start(&hdma2d, source, destination,
-                        TNC_DMA2D_WIDTH, TNC_NATIVE_HEIGHT) != HAL_OK)
-        return false;
-    return HAL_DMA2D_PollForTransfer(&hdma2d, TNC_DMA2D_TIMEOUT_MS) == HAL_OK;
+    for (y = 0u; y < TNC_NATIVE_HEIGHT; ++y)
+        memcpy(dst + (size_t)y * HDMI_WIDTH,
+               src + (size_t)y * src_stride,
+               TNC_NATIVE_WIDTH);
+    __DSB();
 }
 
 static uint32_t native_frame_hash(void)
@@ -596,7 +567,6 @@ static bool present_frame(bool redraw_tnc)
     uint32_t start_core_cycles;
     uint8_t back_fb;
     uint8_t *dst;
-    bool dma_ok;
 
     if (s_swap_pending != 0u)
         return false;
@@ -612,8 +582,8 @@ static bool present_frame(bool redraw_tnc)
             SCB_CleanDCache_by_Addr((uint32_t *)(void *)s_native_frame,
                                     (int32_t)TNC_NATIVE_BYTES);
             __DSB();
-            dma_ok = dma2d_copy_tnc(TNC_NATIVE_ADDRESS,
-                                    framebuffer_tnc_address(back_fb), false);
+            cpu_copy_tnc(TNC_NATIVE_ADDRESS,
+                         framebuffer_tnc_address(back_fb), false);
         } else {
             /* BCTRL/STOP blank the visible TNC window without destroying the
                native L8 surface, so START can reveal it again immediately. */
@@ -622,17 +592,11 @@ static bool present_frame(bool redraw_tnc)
                            framebuffer_tnc_address(back_fb);
             for (y = 0u; y < TNC_NATIVE_HEIGHT; ++y)
                 memset(tnc + (size_t)y * HDMI_WIDTH, 0, TNC_NATIVE_WIDTH);
-            dma_ok = true;
         }
     } else {
-        dma_ok = dma2d_copy_tnc(framebuffer_tnc_address(s_front_fb),
-                                framebuffer_tnc_address(back_fb), true);
+        cpu_copy_tnc(framebuffer_tnc_address(s_front_fb),
+                     framebuffer_tnc_address(back_fb), true);
     }
-    if (!dma_ok) {
-        g_tnc155_faulted = 1u;
-        return false;
-    }
-
     draw_debug_overlay(dst);
 
     __DSB();
@@ -673,8 +637,6 @@ bool TNC155_Firmware_Init(void)
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 
     if (!init_raster_luts())
-        return false;
-    if (!configure_dma2d_raw_l8())
         return false;
 
     load_rgb332_clut();
@@ -754,7 +716,7 @@ void TNC155_Firmware_Task(void)
     } else if (s_swap_pending == 0u && debug_due) {
         /* Diagnostics do not justify copying the TNC window to the other
            SDRAM framebuffer and consuming a page flip.  Updating the small
-           overlay in place avoids a DMA2D burst competing with LTDC scanout. */
+           overlay in place avoids an extra full TNC-window CPU copy. */
         draw_debug_overlay((uint8_t *)(uintptr_t)
                            framebuffer_address(s_front_fb));
         __DSB();
