@@ -1,0 +1,70 @@
+name: Fix TNC155 direct text rendering
+
+on:
+  push:
+    branches: [tnc155-tinyusb-cdc]
+    paths: [.github/workflows/fix-tnc155-direct-text.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tnc155-tinyusb-cdc
+          path: stm32-tnc155
+      - uses: actions/checkout@v4
+        with:
+          repository: Dzy/tnc155-emulator
+          ref: stm32-performance
+          path: tnc155-emulator
+      - name: Remove avoidable text shadow buffers
+        shell: bash
+        working-directory: stm32-tnc155
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('Core/Src/tnc155_upd7220_l8.c')
+          s=p.read_text()
+          s=s.replace('#define TEXT_SHADOW_WORDS           0x8000u\n#define TEXT_DIRTY_CAPACITY         4096u\n','')
+          for block in [
+'''static uint16_t s_text_shadow[TEXT_SHADOW_WORDS];\nstatic uint8_t s_text_valid[TEXT_SHADOW_WORDS / 8u];\nstatic uint8_t s_text_dirty[TEXT_SHADOW_WORDS / 8u];\nstatic uint16_t s_text_dirty_words[TEXT_DIRTY_CAPACITY];\nstatic unsigned s_text_dirty_count;\n''',
+'''static bool text_bit_test(const uint8_t *bits, unsigned word)\n{\n    return (bits[word >> 3] & (uint8_t)(1u << (word & 7u))) != 0u;\n}\n\nstatic void text_bit_set(uint8_t *bits, unsigned word)\n{\n    bits[word >> 3] |= (uint8_t)(1u << (word & 7u));\n}\n\nstatic void invalidate_text_shadow(void)\n{\n    memset(s_text_valid, 0, sizeof(s_text_valid));\n    memset(s_text_dirty, 0, sizeof(s_text_dirty));\n    s_text_dirty_count = 0u;\n}\n\nstatic void queue_text_word(uint32_t word, uint16_t value)\n{\n    unsigned index = (unsigned)(word & 0x7fffu);\n\n    if (text_bit_test(s_text_valid, index) &&\n        s_text_shadow[index] == value)\n        return;\n\n    s_text_shadow[index] = value;\n    text_bit_set(s_text_valid, index);\n    if (!text_bit_test(s_text_dirty, index) &&\n        s_text_dirty_count < TEXT_DIRTY_CAPACITY) {\n        text_bit_set(s_text_dirty, index);\n        s_text_dirty_words[s_text_dirty_count++] = (uint16_t)index;\n    }\n}\n\nstatic void flush_text_words(tnc155_upd7220 *gdc)\n{\n    unsigned i;\n\n    for (i = 0u; i < s_text_dirty_count; ++i) {\n        unsigned word = s_text_dirty_words[i];\n        l8_location loc = locate_word(gdc, word);\n        render_text_cell(s_text_shadow[word], &loc);\n    }\n    memset(s_text_dirty, 0, sizeof(s_text_dirty));\n    s_text_dirty_count = 0u;\n}\n\n''']:
+              if block not in s:
+                  raise SystemExit('expected shadow block not found')
+              s=s.replace(block,'',1)
+          old='''    } else if (loc.valid && type == 0u && effective_mask == 0xffffu &&\n               (mod & 3u) == 0u) {\n        /* Buffer character traffic and render only changed cells when the\n           WDAT stream commits.  The TNC repeatedly writes unchanged display\n           words, which must not expand into hundreds of redundant L8 stores. */\n        queue_text_word(gdc->cursor, data);\n    }\n'''
+          new='''    } else if (loc.valid && type == 0u && effective_mask == 0xffffu &&\n               (mod & 3u) == 0u) {\n        /* Character WDAT is visible immediately.  Do not hide early boot\n           writes in a private shadow/dirty queue: the native L8 surface is\n           the single visible representation used by the STM32 backend. */\n        render_text_cell(data, &loc);\n    }\n'''
+          if old not in s: raise SystemExit('direct_write_word pattern not found')
+          s=s.replace(old,new,1)
+          s=s.replace('    invalidate_text_shadow();\n','')
+          s=s.replace('        flush_text_words(gdc);\n        ++gdc->scanout_commits;','        ++gdc->scanout_commits;')
+          # Ensure no hidden text buffering survives.
+          for token in ('s_text_shadow','s_text_valid','s_text_dirty','queue_text_word','flush_text_words','invalidate_text_shadow','TEXT_SHADOW_WORDS','TEXT_DIRTY_CAPACITY'):
+              if token in s:
+                  raise SystemExit(f'residual hidden buffer token: {token}')
+          p.write_text(s)
+          PY
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-arm-none-eabi
+      - name: Build TNC155B firmware
+        shell: bash
+        working-directory: stm32-tnc155
+        run: |
+          make -f Makefile.tnc155 -j2 TNC155_DIR=../tnc155-emulator ROMSET=tnc155b
+      - name: Commit fix
+        shell: bash
+        working-directory: stm32-tnc155
+        run: |
+          rm .github/workflows/fix-tnc155-direct-text.yml
+          git config user.name "Dzy"
+          git config user.email "3352717+Dzy@users.noreply.github.com"
+          git add Core/Src/tnc155_upd7220_l8.c .github/workflows/fix-tnc155-direct-text.yml
+          git commit -m "Render STM32 TNC155 text directly"
+          git push origin HEAD:tnc155-tinyusb-cdc
