@@ -13,6 +13,30 @@ OPT ?= -O3
 LTO_FLAGS ?= -flto -fuse-linker-plugin
 
 TNC155_DIR ?= ../tnc155-emulator
+ROMSET ?= tnc155b
+
+# Named firmware selections. B and Q use their own complete ROM sets,
+# including their own P6/PLC image. Frankenstein uses the Q P1-P5 firmware
+# with the separate FRANK standard-PLC P6 image.
+ifeq ($(ROMSET),tnc155b)
+TNC155_FIRMWARE_ROMSET = 0
+TNC155_USER_RAM_FILE = $(TNC155_DIR)/tnc155b-user-ram.bin
+else ifeq ($(ROMSET),tnc155q)
+TNC155_FIRMWARE_ROMSET = 1
+TNC155_USER_RAM_FILE = $(TNC155_DIR)/tnc155q-user-ram.bin
+else ifeq ($(ROMSET),frankenstein)
+TNC155_FIRMWARE_ROMSET = 2
+TNC155_USER_RAM_FILE = $(TNC155_DIR)/tnc155q-user-ram.bin
+else ifeq ($(ROMSET),tnc155frank)
+TNC155_FIRMWARE_ROMSET = 2
+TNC155_USER_RAM_FILE = $(TNC155_DIR)/tnc155q-user-ram.bin
+else ifeq ($(ROMSET),frank)
+TNC155_FIRMWARE_ROMSET = 2
+TNC155_USER_RAM_FILE = $(TNC155_DIR)/tnc155q-user-ram.bin
+else
+$(error Unknown ROMSET '$(ROMSET)'. Use ROMSET=tnc155b, ROMSET=tnc155q, or ROMSET=frankenstein)
+endif
+
 TINYUSB_VERSION = 0.21.0
 TINYUSB_COMMIT = dae3f9a366bfcddbf9dcf1b48d7500286a849539
 TINYUSB_DIR = Middlewares/Third_Party/tinyusb
@@ -26,14 +50,21 @@ TNC155_GENERATED_DIR = $(BUILD_DIR)/generated
 TNC155_ROM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_rom_images.h
 TNC155_USER_RAM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_default_user_ram.h
 TNC155_ROM_DIR = $(TNC155_DIR)/roms
-TNC155_ROM5_FILE = $(TNC155_DIR)/rom-overrides/new_2340005E_nr5.bin
+TNC155_ROM5_FILE = $(TNC155_ROM_DIR)/2340005E_nr5.bin
 TNC155_ROM_FILES = \
 $(TNC155_ROM_DIR)/2340201A_nr1.rom \
 $(TNC155_ROM_DIR)/2340202C_nr2.rom \
 $(TNC155_ROM_DIR)/2340083E_nr3_finnish.rom \
 $(TNC155_ROM_DIR)/2340204D_nr4.rom \
 $(TNC155_ROM5_FILE) \
-$(TNC155_ROM_DIR)/2346166A_nr6.rom
+$(TNC155_ROM_DIR)/2346166A_nr6.rom \
+$(TNC155_ROM_DIR)/Heidenhain-Nr1-2340003MNr.1.BIN \
+$(TNC155_ROM_DIR)/Heidenhain-Nr2-2340003MNr.2.BIN \
+$(TNC155_ROM_DIR)/Heidenhain-Nr3-2340003MNr.3.BIN \
+$(TNC155_ROM_DIR)/Heidenhain-Nr4-2340003MNr.4.BIN \
+$(TNC155_ROM_DIR)/Heidenhain-Nr5-2340003MNr.5.BIN \
+$(TNC155_ROM_DIR)/Heidenhain-Nr6-WF5-23496BFDIPLC.BIN \
+$(TNC155_ROM_DIR)/TNC155FRANK-Nr6-Q-PLC23460102.BIN
 
 # Board/application sources. Deliberately no Cube USB Host, HID or LVGL.
 C_SOURCES = \
@@ -136,6 +167,7 @@ C_DEFS = \
 -DSTM32H743xx \
 -DCFG_TUSB_MCU=OPT_MCU_STM32H7 \
 -DTNC155_FIRMWARE=1 \
+-DTNC155_FIRMWARE_ROMSET=$(TNC155_FIRMWARE_ROMSET) \
 -DTNC155_SERIAL_KEYBOARD_TRACE=0
 
 C_INCLUDES = \
@@ -156,9 +188,9 @@ CFLAGS += -g -gdwarf-2
 endif
 CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 
-# TMS9995 is deliberately a non-LTO object.  The linker can then identify its
+# TMS9995 is deliberately a non-LTO object. The linker can then identify its
 # input sections and place executable code in ITCM and compiler-generated
-# constants/jump tables in DTCM.  The rest of the firmware remains LTO-built.
+# constants/jump tables in DTCM. The rest of the firmware remains LTO-built.
 TMS9995_OBJECT = $(BUILD_DIR)/tnc155/src/cpu/tms9995.o
 TMS9995_CFLAGS = $(filter-out -flto -fuse-linker-plugin,$(CFLAGS)) -fno-lto
 
@@ -179,22 +211,24 @@ all: check-tnc155 $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_
 .PHONY: check-tnc155
 check-tnc155:
 	@test -f "$(TNC155_DIR)/src/frontend/serial_keyboard_protocol.c" || \
-	  (echo "TNC155_DIR must point to tnc155-emulator branch stm32-portable-serial" >&2; exit 1)
+	  (echo "TNC155_DIR must point to tnc155-emulator branch stm32-performance" >&2; exit 1)
+	@test -f "$(TNC155_USER_RAM_FILE)" || \
+	  (echo "Missing selected User RAM image: $(TNC155_USER_RAM_FILE)" >&2; exit 1)
+	@echo "TNC155 STM32 ROMSET=$(ROMSET) (id $(TNC155_FIRMWARE_ROMSET)); User RAM=$(TNC155_USER_RAM_FILE)"
 
 $(TNC155_ROM_HEADER): $(TNC155_DIR)/tools/embed_roms.py $(TNC155_ROM_FILES)
 	@mkdir -p $(dir $@)
 	python3 "$(TNC155_DIR)/tools/embed_roms.py" "$(TNC155_ROM_DIR)" "$@" --p5 "$(TNC155_ROM5_FILE)"
 
-# The exact supplied 72 KiB User RAM image is stored compactly in the HDMI
-# repository build tool.  Host Python expands it into normal firmware rodata;
-# tnc155_firmware.c then memcpy()s it to s_machine->main.user_ram[] in SDRAM.
-# There is intentionally no STM32 internal-flash persistence path.
-$(TNC155_USER_RAM_HEADER): tools/embed_tnc155_user_ram.py
+# Embed the matching 72 KiB User RAM image from tnc155-emulator. B gets the
+# B image; Q and Frankenstein get the Q image. There is intentionally no
+# STM32 internal-flash persistence path.
+$(TNC155_USER_RAM_HEADER): tools/embed_tnc155_user_ram.py $(TNC155_USER_RAM_FILE)
 	@mkdir -p $(dir $@)
-	python3 tools/embed_tnc155_user_ram.py "$@"
+	python3 tools/embed_tnc155_user_ram.py "$(TNC155_USER_RAM_FILE)" "$@"
 
 # Rename only Init so a small wrapper can populate ITCM/DTCM before the first
-# TMS9995 call.  Task and LTDC callbacks are provided directly by the core.
+# TMS9995 call. Task and LTDC callbacks are provided directly by the core.
 $(BUILD_DIR)/Core/Src/tnc155_firmware.o: Core/Src/tnc155_firmware.c Makefile.tnc155 $(TNC155_USER_RAM_HEADER)
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) \
