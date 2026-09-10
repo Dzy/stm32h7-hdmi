@@ -7,34 +7,26 @@
 #######################################################################
 
 TARGET = STM32H7_TNC155
-BUILD_DIR = build_tnc155
 DEBUG ?= 1
 OPT ?= -O3
 LTO_FLAGS ?= -flto -fuse-linker-plugin
 
 TNC155_DIR ?= ../tnc155-emulator
 ROMSET ?= tnc155b
+BUILD_DIR = build_tnc155_$(ROMSET)
 
-# Named firmware selections. B and Q use their own complete ROM sets,
-# including their own P6/PLC image. Frankenstein uses the Q P1-P5 firmware
-# with the separate FRANK standard-PLC P6 image.
+# There are exactly two firmware families. Both use the FRANK standard PLC
+# 23460102, while P1-P5 and the non-PLC support part of P6 stay family-specific.
 ifeq ($(ROMSET),tnc155b)
 TNC155_FIRMWARE_ROMSET = 0
+TNC155_EMBED_ROMSET = tnc155b
 TNC155_USER_RAM_FILE = $(TNC155_DIR)/tnc155b-user-ram.bin
 else ifeq ($(ROMSET),tnc155q)
 TNC155_FIRMWARE_ROMSET = 1
-TNC155_USER_RAM_FILE = $(TNC155_DIR)/tnc155q-user-ram.bin
-else ifeq ($(ROMSET),frankenstein)
-TNC155_FIRMWARE_ROMSET = 2
-TNC155_USER_RAM_FILE = $(TNC155_DIR)/tnc155q-user-ram.bin
-else ifeq ($(ROMSET),tnc155frank)
-TNC155_FIRMWARE_ROMSET = 2
-TNC155_USER_RAM_FILE = $(TNC155_DIR)/tnc155q-user-ram.bin
-else ifeq ($(ROMSET),frank)
-TNC155_FIRMWARE_ROMSET = 2
+TNC155_EMBED_ROMSET = tnc155q
 TNC155_USER_RAM_FILE = $(TNC155_DIR)/tnc155q-user-ram.bin
 else
-$(error Unknown ROMSET '$(ROMSET)'. Use ROMSET=tnc155b, ROMSET=tnc155q, or ROMSET=frankenstein)
+$(error Unknown ROMSET '$(ROMSET)'. Use ROMSET=tnc155b or ROMSET=tnc155q)
 endif
 
 TINYUSB_VERSION = 0.21.0
@@ -51,6 +43,9 @@ TNC155_ROM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_rom_images.h
 TNC155_USER_RAM_HEADER = $(TNC155_GENERATED_DIR)/tnc155_default_user_ram.h
 TNC155_ROM_DIR = $(TNC155_DIR)/roms
 TNC155_ROM5_FILE = $(TNC155_ROM_DIR)/2340005E_nr5.bin
+TNC155_PLC_SOURCE = $(TNC155_ROM_DIR)/tnc155_standard_plc_23460102.txt
+
+ifeq ($(ROMSET),tnc155b)
 TNC155_ROM_FILES = \
 $(TNC155_ROM_DIR)/2340201A_nr1.rom \
 $(TNC155_ROM_DIR)/2340202C_nr2.rom \
@@ -58,13 +53,17 @@ $(TNC155_ROM_DIR)/2340083E_nr3_finnish.rom \
 $(TNC155_ROM_DIR)/2340204D_nr4.rom \
 $(TNC155_ROM5_FILE) \
 $(TNC155_ROM_DIR)/2346166A_nr6.rom \
+$(TNC155_PLC_SOURCE)
+else
+TNC155_ROM_FILES = \
 $(TNC155_ROM_DIR)/Heidenhain-Nr1-2340003MNr.1.BIN \
 $(TNC155_ROM_DIR)/Heidenhain-Nr2-2340003MNr.2.BIN \
 $(TNC155_ROM_DIR)/Heidenhain-Nr3-2340003MNr.3.BIN \
 $(TNC155_ROM_DIR)/Heidenhain-Nr4-2340003MNr.4.BIN \
 $(TNC155_ROM_DIR)/Heidenhain-Nr5-2340003MNr.5.BIN \
 $(TNC155_ROM_DIR)/Heidenhain-Nr6-WF5-23496BFDIPLC.BIN \
-$(TNC155_ROM_DIR)/TNC155FRANK-Nr6-Q-PLC23460102.BIN
+$(TNC155_PLC_SOURCE)
+endif
 
 # Board/application sources. Deliberately no Cube USB Host, HID or LVGL.
 C_SOURCES = \
@@ -214,15 +213,15 @@ check-tnc155:
 	  (echo "TNC155_DIR must point to tnc155-emulator branch stm32-performance" >&2; exit 1)
 	@test -f "$(TNC155_USER_RAM_FILE)" || \
 	  (echo "Missing selected User RAM image: $(TNC155_USER_RAM_FILE)" >&2; exit 1)
-	@echo "TNC155 STM32 ROMSET=$(ROMSET) (id $(TNC155_FIRMWARE_ROMSET)); User RAM=$(TNC155_USER_RAM_FILE)"
+	@echo "TNC155 STM32 ROMSET=$(ROMSET) (id $(TNC155_FIRMWARE_ROMSET)); FRANK PLC=23460102; User RAM=$(TNC155_USER_RAM_FILE)"
 
-$(TNC155_ROM_HEADER): $(TNC155_DIR)/tools/embed_roms.py $(TNC155_ROM_FILES)
+$(TNC155_ROM_HEADER): $(TNC155_DIR)/tools/embed_roms.py $(TNC155_DIR)/tools/build_frank_rom.py $(TNC155_ROM_FILES)
 	@mkdir -p $(dir $@)
-	python3 "$(TNC155_DIR)/tools/embed_roms.py" "$(TNC155_ROM_DIR)" "$@" --p5 "$(TNC155_ROM5_FILE)"
+	python3 "$(TNC155_DIR)/tools/embed_roms.py" "$(TNC155_ROM_DIR)" "$@" \
+	  --p5 "$(TNC155_ROM5_FILE)" --only-set "$(TNC155_EMBED_ROMSET)"
 
-# Embed the matching 72 KiB User RAM image from tnc155-emulator. B gets the
-# B image; Q and Frankenstein get the Q image. There is intentionally no
-# STM32 internal-flash persistence path.
+# Embed the matching 72 KiB User RAM image from tnc155-emulator.
+# There is intentionally no STM32 internal-flash persistence path.
 $(TNC155_USER_RAM_HEADER): tools/embed_tnc155_user_ram.py $(TNC155_USER_RAM_FILE)
 	@mkdir -p $(dir $@)
 	python3 tools/embed_tnc155_user_ram.py "$(TNC155_USER_RAM_FILE)" "$@"
