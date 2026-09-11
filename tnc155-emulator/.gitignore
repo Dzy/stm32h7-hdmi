@@ -1,0 +1,15 @@
+# CMake build trees and generated binaries
+/build/
+/build-*/
+/tmp/
+
+# Runtime NVRAM copies and manual safety backups.  The canonical seed image
+# at the repository root remains tracked because it is an emulator input.
+/tnc155-user-ram.bin.~*
+/tnc155-user-ram.before-*.bin
+
+# Editor and operating-system temporary files
+*~
+*.swp
+*.swo
+.DS_Store

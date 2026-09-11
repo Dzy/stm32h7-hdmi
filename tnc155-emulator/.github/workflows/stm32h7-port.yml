@@ -1,0 +1,48 @@
+name: STM32H7 TNC155 port
+
+on:
+  push:
+    branches: [stm32-portable-serial]
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libsdl2-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  stm32h7-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout emulator
+        uses: actions/checkout@v4
+        with:
+          path: tnc155-emulator
+      - name: Checkout STM32 HDMI integration branch
+        uses: actions/checkout@v4
+        with:
+          repository: Dzy/stm32h7-hdmi
+          ref: tnc155-tinyusb-cdc
+          path: stm32h7-hdmi
+      - name: Install ARM toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+      - name: Build STM32H7 firmware
+        working-directory: stm32h7-hdmi
+        run: make -f Makefile.tnc155 -j2 TNC155_DIR=../tnc155-emulator
+      - name: Upload STM32H7 firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: STM32H7_TNC155
+          path: |
+            stm32h7-hdmi/build_tnc155/STM32H7_TNC155.elf
+            stm32h7-hdmi/build_tnc155/STM32H7_TNC155.hex
+            stm32h7-hdmi/build_tnc155/STM32H7_TNC155.bin
+          if-no-files-found: error
